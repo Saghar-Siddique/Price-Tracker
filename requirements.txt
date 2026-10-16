@@ -1,0 +1,8 @@
+requests>=2.31
+beautifulsoup4>=4.12
+lxml>=4.9
+pandas>=2.0
+streamlit>=1.32
+plotly>=5.18
+playwright>=1.40  # exact prices on JS-rendered pages (Daraz promotions)
+pytest>=8.0
