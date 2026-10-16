@@ -2,8 +2,9 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
-[![Tests](https://img.shields.io/badge/tests-passing-brightgreen)]()
-[![License](https://img.shields.io/badge/license-MIT-lightgrey)]()
+[![CI](https://github.com/Saghar-Siddique/Price-Tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/Saghar-Siddique/Price-Tracker/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-30%20passing-brightgreen)]()
+[![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
 **Never overpay again.** Track Daraz.pk product prices over time — add a
 product link, and Price Tracker scrapes the current price on demand, stores
