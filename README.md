@@ -21,7 +21,7 @@ anyone who wants to buy at the right moment.
 - 📊 **Streamlit dashboard** — product table, Plotly trend charts with target-price line, alerts panel
 - 🔔 **Smart alerts** — price-drop % vs last check, plus target-price hits
 - 🖥️ **Full CLI** — add / list / remove / check / history / report
-- 🧪 **Tested** — pytest suite with fixture-based scraper tests (no network in tests); CI runs the suite on every push and PR
+- 🧪 **Tested** — 30 pytest tests with fixture-based scraper tests (no network in tests); CI runs the suite on every push and PR
 
 ## Quickstart
 
