@@ -3,7 +3,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
 [![CI](https://github.com/Saghar-Siddique/Price-Tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/Saghar-Siddique/Price-Tracker/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-30%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-30%20passing-brightgreen)](https://github.com/Saghar-Siddique/Price-Tracker/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
 **Never overpay again.** Track Daraz.pk product prices over time — add a
@@ -22,6 +22,12 @@ anyone who wants to buy at the right moment.
 - 🔔 **Smart alerts** — price-drop % vs last check, plus target-price hits
 - 🖥️ **Full CLI** — add / list / remove / check / history / report
 - 🧪 **Tested** — 30 pytest tests with fixture-based scraper tests (no network in tests); CI runs the suite on every push and PR
+
+## Screenshots
+
+![Dashboard](docs/screenshots/01-dashboard.png)
+![Price history](docs/screenshots/02-price-history.png)
+![Add product](docs/screenshots/03-add-product.png)
 
 ## Quickstart
 
@@ -84,7 +90,7 @@ price_tracker/
 dashboard_app.py # Streamlit dashboard (Plotly charts, seeded demo data)
 tests/
   fixtures/daraz_product.html  # realistic Daraz fixture (no network in tests)
-  test_scraper.py / test_database.py / test_tracker.py
+  test_scraper.py / test_database.py / test_tracker.py / test_dashboard.py
 data/sample_products.csv       # 3 real Daraz URLs to try
 ```
 
