@@ -5,7 +5,7 @@ import pytest
 from price_tracker import database as db
 from price_tracker.alerts import Alert, format_alert
 from price_tracker.scraper import ScrapeError
-from price_tracker.tracker import check_all
+from price_tracker.tracker import check_all, current_alerts
 
 
 @pytest.fixture
@@ -83,3 +83,26 @@ def test_format_alert():
     assert "Earbuds" in text and "15.0%" in text
     t = Alert(1, "Earbuds", "target_hit", 1000.0, 850.0, "PKR")
     assert "target" in format_alert(t).lower()
+
+
+def test_current_alerts_acceptance_case(db_path):
+    """Issue #1 acceptance: target 4,500 on a 5,000 product -> alert at 4,400."""
+    db.add_product(db_path, "https://x.test/a", name="A", target_price=4500.0)
+    db.record_price(db_path, 1, 5000.0, "PKR")
+    db.record_price(db_path, 1, 4400.0, "PKR")
+    alerts = current_alerts(db_path)
+    kinds = {(a.kind, a.new_price) for a in alerts}
+    assert ("target_hit", 4400.0) in kinds
+    drop = next(a for a in alerts if a.kind == "price_drop")
+    assert drop.old_price == 5000.0 and drop.drop_pct == 12.0
+
+
+def test_current_alerts_empty_without_history(db_path):
+    db.add_product(db_path, "https://x.test/a", name="A", target_price=100.0)
+    assert current_alerts(db_path) == []
+
+
+def test_current_alerts_silent_above_target(db_path):
+    db.add_product(db_path, "https://x.test/a", name="A", target_price=4500.0)
+    db.record_price(db_path, 1, 5000.0, "PKR")
+    assert current_alerts(db_path) == []
