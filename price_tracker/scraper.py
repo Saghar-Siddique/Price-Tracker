@@ -1,8 +1,15 @@
-"""Price scraping with polite, site-specific extractors.
+"""Price scraping with polite, store-specific scrapers.
 
-Each supported shop gets an extractor function registered by domain.
-Extractors are pure ``html -> (name, price, currency)`` functions so they
-can be unit-tested against saved fixtures without any network access.
+Each supported shop is a :class:`BaseScraper` subclass registered by
+domain. A new store is added by writing ONE new class — no changes to
+the CLI, the dashboard, or the tracker are needed: :func:`check_all`
+and the dashboard only ever call :func:`fetch_product_price`, which
+dispatches to the registered scraper for the product URL's domain.
+
+Scrapers are pure ``html -> (name, price, currency)`` extractors plus
+an optional :meth:`BaseScraper.fetch` override for JS-heavy shops, so
+extractors can be unit-tested against saved fixtures without any
+network access.
 
 Daraz note: promotion/sale prices are rendered client-side and never appear
 in the static HTML, so daraz.pk URLs are rendered in headless Chromium
@@ -22,6 +29,7 @@ import logging
 import os
 import re
 import time
+from abc import ABC, abstractmethod
 from typing import Callable
 from urllib.parse import urlparse
 
@@ -40,21 +48,10 @@ MAX_RETRIES = 1  # one retry after the first attempt
 RATE_LIMIT_DELAY = 1.0  # seconds between products in bulk checks
 
 Extractor = Callable[[str], tuple[str, float, str]]
-EXTRACTORS: dict[str, Extractor] = {}
 
 
 class ScrapeError(Exception):
     """Raised when a price cannot be fetched or parsed."""
-
-
-def register_extractor(domain: str) -> Callable[[Extractor], Extractor]:
-    """Decorator registering an extractor for a domain substring."""
-
-    def decorator(func: Extractor) -> Extractor:
-        EXTRACTORS[domain] = func
-        return func
-
-    return decorator
 
 
 def parse_price(text: str) -> float:
@@ -83,81 +80,6 @@ def _extract_json_ld(soup: BeautifulSoup) -> dict:
             if isinstance(item, dict) and item.get("@type") == "Product":
                 return item
     return {}
-
-
-@register_extractor("daraz.pk")
-def extract_daraz(html: str) -> tuple[str, float, str]:
-    """Extract (name, price, currency) from a Daraz.pk product page.
-
-    Daraz renders prices client-side, but the static HTML embeds a
-    ``pdpTrackingData`` JavaScript variable holding escaped JSON with
-    ``pdt_name``, ``pdt_price`` (e.g. "Rs. 159,999") and the currency
-    code. Falls back to JSON-LD / <title> / visible "Rs." text.
-    """
-    soup = BeautifulSoup(html, "lxml")
-    name: str | None = None
-    price: float | None = None
-    currency = "PKR"
-
-    # Primary: pdpTrackingData embedded JSON (verified live on daraz.pk).
-    match = re.search(r'pdpTrackingData\s*=\s*"((?:[^"\\]|\\.)*)"', html)
-    if match:
-        try:
-            inner = json.loads(json.loads(f'"{match.group(1)}"'))
-            name = inner.get("pdt_name") or None
-            raw_price = inner.get("pdt_price")
-            if raw_price:
-                price = parse_price(raw_price)
-            currency = (inner.get("core") or {}).get("currencyCode", "PKR") or "PKR"
-        except (json.JSONDecodeError, ScrapeError) as exc:
-            log.debug("pdpTrackingData parse failed: %s", exc)
-
-    # Fallbacks for name.
-    if not name:
-        ld = _extract_json_ld(soup)
-        name = ld.get("name") or None
-    if not name and soup.title and soup.title.string:
-        name = soup.title.string.split("|")[0].strip() or None
-
-    # Fallbacks for price.
-    if price is None:
-        ld = _extract_json_ld(soup)
-        offers = ld.get("offers") or {}
-        if isinstance(offers, dict) and offers.get("price"):
-            try:
-                price = float(offers["price"])
-                currency = offers.get("priceCurrency", currency)
-            except (TypeError, ValueError):
-                pass
-    if price is None:
-        text = soup.get_text(" ", strip=True)
-        m = re.search(r"(?:Rs\.?|PKR)\s?([\d,]+(?:\.\d{1,2})?)", text)
-        if m:
-            price = parse_price(m.group(1))
-
-    if not name:
-        raise ScrapeError("Could not find the product name on the page")
-    if price is None:
-        raise ScrapeError("Could not find the product price on the page")
-    return name, price, currency
-
-
-@register_extractor("generic")
-def extract_generic(html: str) -> tuple[str, float, str]:
-    """Best-effort extractor for unknown shops via schema.org JSON-LD."""
-    soup = BeautifulSoup(html, "lxml")
-    ld = _extract_json_ld(soup)
-    name = ld.get("name")
-    offers = ld.get("offers") or {}
-    price_raw = offers.get("price") if isinstance(offers, dict) else None
-    if not name or price_raw is None:
-        raise ScrapeError("No schema.org Product/offer data found on the page")
-    try:
-        price = float(price_raw)
-    except (TypeError, ValueError) as exc:
-        raise ScrapeError(f"Could not parse offer price {price_raw!r}") from exc
-    currency = offers.get("priceCurrency", "PKR") if isinstance(offers, dict) else "PKR"
-    return name, price, currency
 
 
 def _download(url: str) -> str:
@@ -260,24 +182,313 @@ def fetch_rendered_price(url: str, timeout_ms: int = 30000) -> tuple[str, float,
     return name, parse_price(data["sale"]), "PKR"
 
 
-def fetch_product_price(url: str) -> tuple[str, float, str]:
-    """Scrape (name, price, currency) for a product URL.
+# ---------------------------------------------------------------------------
+# Store scrapers (plugins)
+# ---------------------------------------------------------------------------
 
-    For daraz.pk this renders the page in headless Chromium so the price is
-    always the exact selling price (promotion price when a discount is active,
-    otherwise the regular price). Falls back to static HTML extraction when
-    Playwright is unavailable. Other domains use the registered static
-    extractor for the domain, falling back to the generic JSON-LD extractor.
+
+class BaseScraper(ABC):
+    """Interface every store scraper implements.
+
+    To add a store, subclass this, set :attr:`name` and :attr:`domains`,
+    implement :meth:`extract`, and decorate the class with
+    :func:`register_scraper` — nothing else needs to change. The default
+    :meth:`fetch` downloads the static page and extracts from it; shops
+    whose prices only render client-side (Daraz) override :meth:`fetch`.
     """
-    domain = urlparse(url).netloc.lower()
-    if "daraz.pk" in domain:
+
+    #: Human-readable store name, e.g. "Daraz".
+    name: str = "generic"
+
+    #: Domain substrings this scraper handles, e.g. ("daraz.pk",).
+    domains: tuple[str, ...] = ()
+
+    @classmethod
+    def can_handle(cls, url: str) -> bool:
+        """True when this scraper serves the URL's domain."""
+        domain = urlparse(url).netloc.lower()
+        return any(d in domain for d in cls.domains)
+
+    @staticmethod
+    @abstractmethod
+    def extract(html: str) -> tuple[str, float, str]:
+        """Extract (name, price, currency) from a product page's HTML."""
+        raise NotImplementedError
+
+    def fetch(self, url: str) -> tuple[str, float, str]:
+        """Fetch (name, price, currency) for a product URL."""
+        return self.extract(_download(url))
+
+
+SCRAPERS: list[type[BaseScraper]] = []
+
+#: Domain -> extractor, kept for backward compatibility (kept in sync by
+#: the registry; ``register_extractor`` also writes here).
+EXTRACTORS: dict[str, Extractor] = {}
+
+
+def register_scraper(cls: type[BaseScraper]) -> type[BaseScraper]:
+    """Class decorator registering a store scraper by its domains."""
+    SCRAPERS.append(cls)
+    for domain in cls.domains:
+        EXTRACTORS[domain] = cls.extract
+    return cls
+
+
+def get_scraper(url: str) -> BaseScraper:
+    """Return the registered scraper for a product URL's domain.
+
+    Falls back to :class:`GenericScraper` (schema.org JSON-LD) for
+    unknown shops.
+    """
+    for cls in SCRAPERS:
+        if cls.can_handle(url):
+            return cls()
+    return GenericScraper()
+
+
+def supported_stores() -> list[str]:
+    """Names of the registered stores, in registration order."""
+    return [cls.name for cls in SCRAPERS]
+
+
+@register_scraper
+class DarazScraper(BaseScraper):
+    """Scraper for Daraz.pk — exact selling price via headless Chromium."""
+
+    name = "Daraz"
+    domains = ("daraz.pk",)
+
+    @staticmethod
+    def extract(html: str) -> tuple[str, float, str]:
+        """Extract (name, price, currency) from a Daraz.pk product page.
+
+        Daraz renders prices client-side, but the static HTML embeds a
+        ``pdpTrackingData`` JavaScript variable holding escaped JSON with
+        ``pdt_name``, ``pdt_price`` (e.g. "Rs. 159,999") and the currency
+        code. Falls back to JSON-LD / <title> / visible "Rs." text.
+        """
+        soup = BeautifulSoup(html, "lxml")
+        name: str | None = None
+        price: float | None = None
+        currency = "PKR"
+
+        # Primary: pdpTrackingData embedded JSON (verified live on daraz.pk).
+        match = re.search(r'pdpTrackingData\s*=\s*"((?:[^"\\]|\\.)*)"', html)
+        if match:
+            try:
+                inner = json.loads(json.loads(f'"{match.group(1)}"'))
+                name = inner.get("pdt_name") or None
+                raw_price = inner.get("pdt_price")
+                if raw_price:
+                    price = parse_price(raw_price)
+                currency = (inner.get("core") or {}).get("currencyCode", "PKR") or "PKR"
+            except (json.JSONDecodeError, ScrapeError) as exc:
+                log.debug("pdpTrackingData parse failed: %s", exc)
+
+        # Fallbacks for name.
+        if not name:
+            ld = _extract_json_ld(soup)
+            name = ld.get("name") or None
+        if not name and soup.title and soup.title.string:
+            name = soup.title.string.split("|")[0].strip() or None
+
+        # Fallbacks for price.
+        if price is None:
+            ld = _extract_json_ld(soup)
+            offers = ld.get("offers") or {}
+            if isinstance(offers, dict) and offers.get("price"):
+                try:
+                    price = float(offers["price"])
+                    currency = offers.get("priceCurrency", currency)
+                except (TypeError, ValueError):
+                    pass
+        if price is None:
+            text = soup.get_text(" ", strip=True)
+            m = re.search(r"(?:Rs\.?|PKR)\s?([\d,]+(?:\.\d{1,2})?)", text)
+            if m:
+                price = parse_price(m.group(1))
+
+        if not name:
+            raise ScrapeError("Could not find the product name on the page")
+        if price is None:
+            raise ScrapeError("Could not find the product price on the page")
+        return name, price, currency
+
+    def fetch(self, url: str) -> tuple[str, float, str]:
+        """Render in Chromium for the exact selling price; static fallback."""
         try:
             return fetch_rendered_price(url)
         except ScrapeError as exc:
             log.warning("JS render failed (%s); falling back to static HTML", exc)
-    extractor = next(
-        (fn for key, fn in EXTRACTORS.items() if key != "generic" and key in domain),
-        EXTRACTORS["generic"],
-    )
-    html = _download(url)
-    return extractor(html)
+        return self.extract(_download(url))
+
+
+@register_scraper
+class PriceOyeScraper(BaseScraper):
+    """Scraper for PriceOye.pk — mobile prices via schema.org JSON-LD.
+
+    Verified live on priceoye.pk (Samsung Galaxy A07): the product page
+    embeds a JSON-LD Product block with ``name`` and ``offers.price`` /
+    ``offers.priceCurrency``. Fallbacks: <title> for the name
+    ("<Name> Price in Pakistan ... | Priceoye") and the visible
+    "lowest price in Pakistan of Rs. X" text for the price.
+    """
+
+    name = "PriceOye"
+    domains = ("priceoye.pk",)
+
+    @staticmethod
+    def extract(html: str) -> tuple[str, float, str]:
+        soup = BeautifulSoup(html, "lxml")
+        name: str | None = None
+        price: float | None = None
+        currency = "PKR"
+
+        ld = _extract_json_ld(soup)
+        if ld:
+            name = ld.get("name") or None
+            offers = ld.get("offers") or {}
+            if isinstance(offers, dict) and offers.get("price"):
+                try:
+                    price = float(offers["price"])
+                    currency = offers.get("priceCurrency", currency) or "PKR"
+                except (TypeError, ValueError):
+                    price = None
+
+        if not name and soup.title and soup.title.string:
+            title = soup.title.string.strip()
+            name = re.split(r"\s+Price in Pakistan|\|", title)[0].strip() or None
+
+        if price is None:
+            text = soup.get_text(" ", strip=True)
+            m = re.search(
+                r"lowest price in Pakistan of\s*(?:Rs\.?|PKR)\s?([\d,]+(?:\.\d{1,2})?)",
+                text,
+                flags=re.IGNORECASE,
+            )
+            if m:
+                price = parse_price(m.group(1))
+
+        if not name:
+            raise ScrapeError("Could not find the product name on the page")
+        if price is None:
+            raise ScrapeError("Could not find the product price on the page")
+        return name, price, currency
+
+
+@register_scraper
+class TelemartScraper(BaseScraper):
+    """Scraper for Telemart.pk / TeleX — sale price from the price block.
+
+    Verified live on telex.pk (Goonj Nexo Wireless Earbuds): the selling
+    price sits in ``<span class="product-price__sale">Rs.2,699.00</span>``
+    with the original price struck through in ``<s class="compare_price">``.
+    Fallback: the embedded ``"price":269900`` minor-units field. The
+    visible-text "Rs." fallback is deliberately NOT used here — the page
+    also contains a stray "Rs.0", and a wrong price is worse than no price.
+    """
+
+    name = "Telemart"
+    domains = ("telemart.pk", "telex.pk")
+
+    @staticmethod
+    def extract(html: str) -> tuple[str, float, str]:
+        soup = BeautifulSoup(html, "lxml")
+        name: str | None = None
+        price: float | None = None
+
+        if soup.title and soup.title.string:
+            # "Goonj Nexo Wireless Earbuds – TeleX (Telemart)"
+            title = soup.title.string.strip()
+            name = re.split(r"\s+[–—-]\s+", title)[0].strip() or None
+
+        sale = soup.select_one("span.product-price__sale")
+        if sale and sale.get_text(strip=True):
+            try:
+                price = parse_price(sale.get_text(strip=True))
+            except ScrapeError:
+                price = None
+
+        if price is None:
+            # Embedded variant JSON carries the price in minor units.
+            m = re.search(r'"price"\s*:\s*(\d+)', html)
+            if m:
+                minor = int(m.group(1))
+                if minor > 0:
+                    price = minor / 100.0
+
+        if not name:
+            raise ScrapeError("Could not find the product name on the page")
+        if price is None:
+            raise ScrapeError("Could not find the product price on the page")
+        return name, price, "PKR"
+
+
+class GenericScraper(BaseScraper):
+    """Best-effort scraper for unknown shops via schema.org JSON-LD."""
+
+    name = "Generic"
+    domains = ()
+
+    @staticmethod
+    def extract(html: str) -> tuple[str, float, str]:
+        soup = BeautifulSoup(html, "lxml")
+        ld = _extract_json_ld(soup)
+        name = ld.get("name")
+        offers = ld.get("offers") or {}
+        price_raw = offers.get("price") if isinstance(offers, dict) else None
+        if not name or price_raw is None:
+            raise ScrapeError("No schema.org Product/offer data found on the page")
+        try:
+            price = float(price_raw)
+        except (TypeError, ValueError) as exc:
+            raise ScrapeError(f"Could not parse offer price {price_raw!r}") from exc
+        currency = offers.get("priceCurrency", "PKR") if isinstance(offers, dict) else "PKR"
+        return name, price, currency
+
+
+# ---------------------------------------------------------------------------
+# Entry point + backward-compatible aliases
+# ---------------------------------------------------------------------------
+
+EXTRACTORS["generic"] = GenericScraper.extract
+
+
+def register_extractor(domain: str) -> Callable[[Extractor], Extractor]:
+    """Legacy decorator registering a function extractor for a domain.
+
+    The function is wrapped in a :class:`BaseScraper` subclass and
+    registered, so it also works through :func:`fetch_product_price`.
+    Prefer :func:`register_scraper` for new stores.
+    """
+
+    def decorator(func: Extractor) -> Extractor:
+        cls_name = "".join(part.capitalize() for part in re.split(r"\W+", domain) if part)
+        cls = type(
+            f"{cls_name}Scraper",
+            (BaseScraper,),
+            {"name": domain, "domains": (domain,), "extract": staticmethod(func)},
+        )
+        SCRAPERS.append(cls)
+        EXTRACTORS[domain] = func
+        return func
+
+    return decorator
+
+
+#: Backward-compatible aliases for the pre-plugin API.
+extract_daraz = DarazScraper.extract
+extract_generic = GenericScraper.extract
+
+
+def fetch_product_price(url: str) -> tuple[str, float, str]:
+    """Scrape (name, price, currency) for a product URL.
+
+    Dispatches to the registered scraper for the URL's domain: Daraz
+    renders in headless Chromium for the exact selling price (promotion
+    price when a discount is active, otherwise the regular price, with a
+    static-HTML fallback); PriceOye and Telemart parse static HTML;
+    unknown shops use the generic JSON-LD extractor.
+    """
+    return get_scraper(url).fetch(url)
