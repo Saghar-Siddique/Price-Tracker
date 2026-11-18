@@ -81,3 +81,47 @@ def check_all(
                 )
             )
     return alerts
+
+
+def current_alerts(db_path: str | Path) -> list[Alert]:
+    """Derive alerts from stored history — no scraping.
+
+    What the dashboard shows on load: a ``target_hit`` for every product
+    whose latest stored price is at/below its target, and a
+    ``price_drop`` where the latest price fell vs the previous check.
+    Same Alert shapes as :func:`check_all`, so ``format_alert`` renders
+    them identically. Products with no price history raise nothing.
+    """
+    alerts: list[Alert] = []
+    for product in db.list_products(db_path):
+        assert product.id is not None  # always set for rows read from the DB
+        history = db.get_history(db_path, product.id)
+        if not history:
+            continue
+        latest = history[-1]
+        previous = history[-2] if len(history) >= 2 else None
+        if previous is not None and latest.price < previous.price:
+            alerts.append(
+                Alert(
+                    product_id=product.id,
+                    product_name=product.name,
+                    kind="price_drop",
+                    old_price=previous.price,
+                    new_price=latest.price,
+                    currency=latest.currency,
+                    checked_at=latest.checked_at,
+                )
+            )
+        if product.target_price is not None and latest.price <= product.target_price:
+            alerts.append(
+                Alert(
+                    product_id=product.id,
+                    product_name=product.name,
+                    kind="target_hit",
+                    old_price=previous.price if previous else None,
+                    new_price=latest.price,
+                    currency=latest.currency,
+                    checked_at=latest.checked_at,
+                )
+            )
+    return alerts

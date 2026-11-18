@@ -49,3 +49,11 @@ def test_add_product_form_via_ui(tmp_path, monkeypatch):
     assert not at.exception, at.exception
     # 3 seeded demo products + 1 added = 4 rows in the overview table
     assert len(at.dataframe[0].value) == 4
+
+
+def test_dashboard_shows_alert_banner_on_load(tmp_path, monkeypatch):
+    """Issue #1: seeded demo data is all at/below target, so the alerts
+    panel must render banners on a fresh load — no button press needed."""
+    at = _run(tmp_path, monkeypatch)
+    assert len(at.warning) >= 1
+    assert any("target reached" in str(w.value) for w in at.warning)

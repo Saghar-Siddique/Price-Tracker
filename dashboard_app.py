@@ -21,7 +21,7 @@ import streamlit as st
 from price_tracker import database as db
 from price_tracker.alerts import format_alert
 from price_tracker.models import Product
-from price_tracker.tracker import check_all
+from price_tracker.tracker import check_all, current_alerts
 
 st.set_page_config(page_title="Price Tracker", page_icon="🏷️", layout="wide")
 
@@ -148,8 +148,14 @@ with st.sidebar:
             db.remove_product(db_path, label_to_id[doomed])
             st.rerun()
 
-# ---- alerts panel
-alerts = st.session_state["alerts"]
+# ---- alerts panel: stored-history alerts + fresh-check alerts, deduped
+seen: set = set()
+alerts = []
+for a in current_alerts(db_path) + st.session_state["alerts"]:
+    key = (a.product_id, a.kind, a.new_price)
+    if key not in seen:
+        seen.add(key)
+        alerts.append(a)
 if alerts:
     st.subheader("🔔 Latest alerts")
     for a in alerts:
