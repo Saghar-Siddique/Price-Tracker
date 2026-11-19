@@ -112,12 +112,17 @@ price is picked by three strategies, in order: the standard
 element, and — when Daraz renames its price classes — the smallest Rs.
 amount inside the price box (a sale price is always ≤ the original
 price; per-month installment amounts are excluded). The browser waits
-for the price element itself (up to 15s), not just the title, because
-Daraz renders the price after the title — and if no price ever
+for the price element itself (up to 30s), not just the title, because
+Daraz renders the price after the title — it also waits for the
+network to settle first (best-effort, capped at 15s), and if the page
+loads but no price appears it reloads once and tries again: lazily
+rendered prices often appear on a second load. If no price ever
 appears, the failure message carries a snippet of the page text, so
 the dashboard warning shows whether the page was a bot check or just
-an empty price box. If no browser can be launched, it falls back to
-static HTML extraction (`pdpTrackingData`
+an empty price box. A check can therefore take a few minutes when
+Daraz is slow — the dashboard spinner says so while it runs. If no
+browser can be launched, it falls back to static HTML extraction
+(`pdpTrackingData`
 embedded JSON, verified live on daraz.pk) with schema.org JSON-LD and
 visible price text as further fallbacks — **but the static fallback
 returns the list price on a sale page, not the sale price** (verified

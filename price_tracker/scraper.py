@@ -172,7 +172,33 @@ def _launch_browser(p):
     raise ScrapeError(f"Could not launch Chromium: {last_error}")
 
 
-def fetch_rendered_price(url: str, timeout_ms: int = 30000) -> tuple[str, float, str]:
+#: How long to wait for the price element itself to appear (Daraz
+#: renders it lazily, after the title — and slowly on a cold container).
+PRICE_WAIT_MS = 30000
+
+#: Best-effort settle for the price XHR: how long to wait for the
+#: network to go quiet after the title appears. Daraz pages can keep
+#: connections open, so this is capped and never fatal.
+NETWORK_IDLE_MS = 15000
+
+
+#: JS predicate: true once the price box holds a readable Rs./PKR
+#: amount. Kept as a constant so tests can check the exact predicate
+#: the wait uses (a wrong escape here silently turns the wait into a
+#: full-timeout sleep — see PR #7, where `\\.` was written as `\\\\.`
+#: and the wait never matched anything).
+PRICE_PRESENT_JS = (
+    "() => { const box = document.querySelector('.pdp-product-price');"
+    " return box && /(Rs\\.?|PKR)/.test(box.innerText); }"
+)
+
+
+def fetch_rendered_price(
+    url: str,
+    timeout_ms: int = 30000,
+    price_wait_ms: int = PRICE_WAIT_MS,
+    networkidle_ms: int = NETWORK_IDLE_MS,
+) -> tuple[str, float, str]:
     """Render a JS-heavy page in headless Chromium and extract the selling price.
 
     This is the only way to get EXACT prices on Daraz: promotion/sale prices
@@ -233,31 +259,41 @@ def fetch_rendered_price(url: str, timeout_ms: int = 30000) -> tuple[str, float,
         out.sale = (saleEl && saleEl.innerText || '').trim() || saleText;
         return out;
     }"""
+    def _attempt(page) -> dict:
+        # Wait on the verified title selector; price markup can vary.
+        page.wait_for_selector("h1.pdp-mod-product-badge-title", timeout=timeout_ms)
+        # Let the price XHR finish: best-effort, never fatal.
+        try:
+            page.wait_for_load_state("networkidle", timeout=networkidle_ms)
+        except Exception:
+            pass
+        # Wait for the PRICE itself, not just the title: Daraz renders
+        # the price client-side after the title, and on a slow
+        # connection it can take many seconds. If it never appears,
+        # carry on anyway — the strategies below still run, and the
+        # failure message will say what the page held.
+        try:
+            page.wait_for_function(PRICE_PRESENT_JS, timeout=price_wait_ms)
+        except Exception:
+            pass  # price never appeared; diagnose below from the page text
+        page.wait_for_timeout(2500)  # let the client-side price render
+        return page.evaluate(js)
+
     try:
         with sync_playwright() as p:
             browser = _launch_browser(p)
             try:
                 page = browser.new_page(user_agent=USER_AGENT)
                 page.goto(url, timeout=60000, wait_until="domcontentloaded")
-                # Wait on the verified title selector; price markup can vary.
-                page.wait_for_selector(
-                    "h1.pdp-mod-product-badge-title", timeout=timeout_ms
-                )
-                # Wait for the PRICE itself, not just the title: Daraz
-                # renders the price client-side after the title, and on a
-                # slow connection it can take many seconds. If it never
-                # appears, carry on anyway — the strategies below still
-                # run, and the failure message will say what the page held.
-                try:
-                    page.wait_for_function(
-                        "() => { const box = document.querySelector('.pdp-product-price');"
-                        " return box && /(Rs\\\\.?|PKR)/.test(box.innerText); }",
-                        timeout=15000,
-                    )
-                except Exception:
-                    pass  # price never appeared; diagnose below from the page text
-                page.wait_for_timeout(2500)  # let the client-side price render
-                data = page.evaluate(js)
+                data = _attempt(page)
+                if not data.get("sale"):
+                    # One reload-and-retry: lazily rendered prices often
+                    # appear on a second load. Only retried when the page
+                    # itself loaded (title found) but the price did not —
+                    # dead URLs fail the title wait instead and are not
+                    # retried.
+                    page.reload(wait_until="domcontentloaded", timeout=60000)
+                    data = _attempt(page)
             finally:
                 browser.close()
     except Exception as exc:
