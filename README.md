@@ -11,6 +11,8 @@ time — add a product link, and Price Tracker scrapes the current price on
 demand, stores every check in SQLite, charts the trend, and alerts you on
 price drops or when your target price is hit.
 
+🔗 **Live Demo:** [price-tracker-saghar.streamlit.app](https://price-tracker-saghar.streamlit.app/)
+
 **Perfect for:** bargain hunters, resellers tracking competitor prices, and
 anyone who wants to buy at the right moment.
 
