@@ -77,6 +77,14 @@ def test_scraper_name_updates_product(db_path):
     assert db.get_product(db_path, 1).name == "Fake Product"
 
 
+def test_check_all_keeps_user_chosen_name(db_path):
+    """A name typed at add time must survive later checks (live-app bug,
+    Nov 19 2026: "Test Earbuds" was overwritten by the full Daraz title)."""
+    db.add_product(db_path, "https://x.test/a", name="Test Earbuds")
+    check_all(db_path, fetch=_fake_fetch({"https://x.test/a": 100.0}))
+    assert db.get_product(db_path, 1).name == "Test Earbuds"
+
+
 def test_format_alert():
     a = Alert(1, "Earbuds", "price_drop", 1000.0, 850.0, "PKR")
     text = format_alert(a)

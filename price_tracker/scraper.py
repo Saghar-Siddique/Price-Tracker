@@ -98,6 +98,17 @@ def _download(url: str) -> str:
     raise ScrapeError(f"Failed to download {url}: {last_error}")
 
 
+#: System Chromium paths tried when Playwright's bundled browser is
+#: missing (e.g. Streamlit Cloud, where ``packages.txt`` installs
+#: Debian's ``chromium``).
+SYSTEM_CHROMIUM_PATHS = (
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+)
+
+
 def _browser_proxy() -> dict | None:
     """Playwright proxy config from environment, or None for direct.
 
@@ -118,6 +129,44 @@ def _browser_proxy() -> dict | None:
     return cfg
 
 
+def _launch_browser(p):
+    """Launch Chromium for Playwright, falling back to a system install.
+
+    Tries Playwright's bundled browser first, then a system Chromium —
+    ``PLAYWRIGHT_CHROMIUM_PATH`` when set, else the usual distro paths.
+    The system path matters on hosts that cannot run
+    ``playwright install`` (e.g. Streamlit Cloud, where ``packages.txt``
+    installs Debian's ``chromium``). ``--no-sandbox`` is required in
+    containers. Raises ScrapeError when no browser can be launched.
+    """
+    candidates: list[dict] = [
+        {"headless": True, "proxy": _browser_proxy(), "args": ["--no-sandbox"]}
+    ]
+    paths = [os.environ["PLAYWRIGHT_CHROMIUM_PATH"]] if os.environ.get("PLAYWRIGHT_CHROMIUM_PATH") else []
+    paths += [c for c in SYSTEM_CHROMIUM_PATHS if os.path.exists(c)]
+    for path in paths:
+        candidates.append(
+            {
+                "headless": True,
+                "proxy": _browser_proxy(),
+                "args": ["--no-sandbox"],
+                "executable_path": path,
+            }
+        )
+    last_error: Exception | None = None
+    for kwargs in candidates:
+        try:
+            return p.chromium.launch(**kwargs)
+        except Exception as exc:  # noqa: BLE001 - try the next candidate
+            last_error = exc
+            log.debug(
+                "Chromium launch failed (%s): %s",
+                kwargs.get("executable_path", "bundled"),
+                exc,
+            )
+    raise ScrapeError(f"Could not launch Chromium: {last_error}")
+
+
 def fetch_rendered_price(url: str, timeout_ms: int = 30000) -> tuple[str, float, str]:
     """Render a JS-heavy page in headless Chromium and extract the selling price.
 
@@ -126,8 +175,11 @@ def fetch_rendered_price(url: str, timeout_ms: int = 30000) -> tuple[str, float,
     carries the original list price). If a discount is running, this returns
     the discounted price; otherwise the regular price.
 
-    Requires: ``pip install playwright`` and ``playwright install chromium``.
-    Raises ScrapeError if Playwright is missing or the price can't be read.
+    Requires: ``pip install playwright`` and a Chromium binary — either
+    ``playwright install chromium`` or a system Chromium (see
+    :func:`_launch_browser`; Streamlit Cloud installs one from
+    ``packages.txt``). Raises ScrapeError if Playwright is missing, no
+    browser can be launched, or the price can't be read.
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -159,7 +211,7 @@ def fetch_rendered_price(url: str, timeout_ms: int = 30000) -> tuple[str, float,
     }"""
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, proxy=_browser_proxy())
+            browser = _launch_browser(p)
             try:
                 page = browser.new_page(user_agent=USER_AGENT)
                 page.goto(url, timeout=60000, wait_until="domcontentloaded")
@@ -267,6 +319,12 @@ class DarazScraper(BaseScraper):
         ``pdpTrackingData`` JavaScript variable holding escaped JSON with
         ``pdt_name``, ``pdt_price`` (e.g. "Rs. 159,999") and the currency
         code. Falls back to JSON-LD / <title> / visible "Rs." text.
+
+        WARNING: ``pdt_price`` is the LIST price — on a sale page it is
+        the struck-through original price, not the selling price (the
+        sale price never appears in the static HTML). This extractor is
+        only a last-resort fallback; the exact selling price comes from
+        the rendered page via :func:`fetch_rendered_price`.
         """
         soup = BeautifulSoup(html, "lxml")
         name: str | None = None

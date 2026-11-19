@@ -1,5 +1,6 @@
 """Scraper tests — fixture HTML only, NO live network."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -142,3 +143,81 @@ def test_extract_generic_no_data_raises():
 
 def test_daraz_registered():
     assert "daraz.pk" in EXTRACTORS
+
+
+# ---------------------------------------------------------------------------
+# Sale-page regression (live-app bug found Nov 19, 2026)
+# ---------------------------------------------------------------------------
+
+#: Trimmed real Daraz page for a product on sale (AirBuds_Pro): the page
+#: sells at Rs. 699 with Rs. 2,199 struck through as the original price.
+SALE_FIXTURE = Path(__file__).parent / "fixtures" / "daraz_sale_product.html"
+SALE_URL = (
+    "https://www.daraz.pk/products/airbuds_pro-wireless-earbuds-"
+    "bluetooth-50-super-sound-bass-charging-case-and-extra-ear-buds-"
+    "pop-up-feature-compatible-with-all-devices-i1983435427-s14073966757.html"
+)
+
+
+def test_daraz_static_returns_list_price_on_sale_page():
+    """Static extraction on a sale page returns the struck-through LIST
+    price (Rs. 2,199) — the Rs. 699 sale price never appears in the
+    static HTML. Pinned so this limitation stays visible: the static
+    path is a degraded fallback, never the source of truth for a price."""
+    html = SALE_FIXTURE.read_text(encoding="utf-8")
+    name, price, currency = extract_daraz(html)
+    assert "AirBuds_Pro" in name
+    assert price == 2199.0
+    assert currency == "PKR"
+
+
+def test_daraz_fetch_returns_list_price_when_browser_missing(monkeypatch):
+    """Mirrors the live failure exactly: with no browser available, the
+    Daraz fetch falls back to static HTML and records the list price."""
+    def no_browser(url, timeout_ms=30000):
+        raise ScrapeError("no browser")
+
+    monkeypatch.setattr(scraper, "fetch_rendered_price", no_browser)
+    monkeypatch.setattr(
+        scraper, "_download", lambda url: SALE_FIXTURE.read_text(encoding="utf-8")
+    )
+    name, price, currency = scraper.DarazScraper().fetch(SALE_URL)
+    assert price == 2199.0
+    assert currency == "PKR"
+
+
+def test_launch_browser_falls_back_to_system_chromium(monkeypatch):
+    """When the bundled browser can't launch, a system Chromium is tried."""
+    monkeypatch.delenv("PLAYWRIGHT_CHROMIUM_PATH", raising=False)
+    calls = []
+
+    class FakeChromium:
+        def launch(self, **kwargs):
+            calls.append(kwargs)
+            if "executable_path" not in kwargs:
+                raise Exception("Executable doesn't exist")
+            return "fake-browser"
+
+    class FakeP:
+        chromium = FakeChromium()
+
+    monkeypatch.setattr(os.path, "exists", lambda p: p == "/usr/bin/chromium")
+    assert scraper._launch_browser(FakeP()) == "fake-browser"
+    assert calls[0].get("executable_path") is None  # bundled tried first
+    assert calls[1]["executable_path"] == "/usr/bin/chromium"
+    assert calls[0]["args"] == ["--no-sandbox"]
+
+
+def test_launch_browser_raises_when_nothing_works(monkeypatch):
+    monkeypatch.delenv("PLAYWRIGHT_CHROMIUM_PATH", raising=False)
+
+    class FakeChromium:
+        def launch(self, **kwargs):
+            raise Exception("no browser at all")
+
+    class FakeP:
+        chromium = FakeChromium()
+
+    monkeypatch.setattr(os.path, "exists", lambda p: False)
+    with pytest.raises(ScrapeError, match="Could not launch Chromium"):
+        scraper._launch_browser(FakeP())

@@ -62,6 +62,11 @@ def seed_demo_data(db_path: str | Path) -> None:
 # ---------------------------------------------------------------- helpers
 
 
+def _short(name: str, limit: int = 40) -> str:
+    """Shorten a long product name for labels, keeping it readable."""
+    return name if len(name) <= limit else name[: limit - 1].rstrip() + "…"
+
+
 def _latest_rows(db_path: str | Path) -> pd.DataFrame:
     """One row per product: latest price, previous price, target."""
     rows = []
@@ -72,7 +77,7 @@ def _latest_rows(db_path: str | Path) -> pd.DataFrame:
         rows.append(
             {
                 "id": p.id,
-                "Product": p.name,
+                "Product": _short(p.name, 45),
                 "Latest": f"{latest.currency} {latest.price:,.0f}" if latest else "—",
                 "Change": (
                     f"{latest.price - prev:+,.0f}" if (latest and prev) else "—"
@@ -99,7 +104,10 @@ def _history_frame(db_path: str | Path, product: Product) -> pd.DataFrame:
 
 # ---------------------------------------------------------------- app
 
-db_path = st.sidebar.text_input("Database path", value=DEFAULT_DB)
+# The database path is fixed (env PRICE_TRACKER_DB or "prices.db") and
+# shown read-only — an editable path field invites accidental data loss.
+db_path = DEFAULT_DB
+st.sidebar.caption(f"🗄️ Database: {db_path}")
 db.init_db(db_path)
 
 if not db.list_products(db_path):
@@ -114,7 +122,7 @@ if "alerts" not in st.session_state:
 
 with st.sidebar:
     st.header("➕ Track a product")
-    with st.form("add_product"):
+    with st.form("add_product", clear_on_submit=True):
         url = st.text_input("Daraz product URL")
         name = st.text_input("Name (optional)")
         target = st.number_input("Target price (optional, PKR)", min_value=0.0, value=0.0)
@@ -140,13 +148,37 @@ with st.sidebar:
         st.rerun()
 
     st.header("🗑️ Remove")
+    if st.session_state.get("remove_notice"):
+        st.success(st.session_state.pop("remove_notice"))
     products = db.list_products(db_path)
     if products:
-        label_to_id = {f"#{p.id} {p.name[:40]}": p.id for p in products}
-        doomed = st.selectbox("Product to remove", list(label_to_id))
+        label_to_id = {f"#{p.id} {_short(p.name)}": p.id for p in products}
+        # No pre-selected product: deleting the wrong row must take intent.
+        doomed = st.selectbox(
+            "Product to remove", list(label_to_id),
+            index=None, placeholder="Select a product…",
+        )
         if st.button("Remove product"):
-            db.remove_product(db_path, label_to_id[doomed])
-            st.rerun()
+            if doomed is None:
+                st.warning("Select a product first.")
+            else:
+                st.session_state["confirm_remove"] = label_to_id[doomed]
+        if st.session_state.get("confirm_remove") is not None:
+            pid = st.session_state["confirm_remove"]
+            pname = next((p.name for p in products if p.id == pid), "")
+            st.warning(
+                f"Delete “{_short(pname)}” and all its price history? "
+                "This cannot be undone."
+            )
+            col_yes, col_no = st.columns(2)
+            if col_yes.button("Yes, delete"):
+                db.remove_product(db_path, pid)
+                st.session_state.pop("confirm_remove", None)
+                st.session_state["remove_notice"] = f"Removed “{_short(pname)}”."
+                st.rerun()
+            if col_no.button("Cancel"):
+                st.session_state.pop("confirm_remove", None)
+                st.rerun()
 
 # ---- alerts panel: stored-history alerts + fresh-check alerts, deduped
 seen: set = set()
@@ -172,14 +204,14 @@ products = db.list_products(db_path)
 if products:
     choice = st.selectbox(
         "Product",
-        [f"#{p.id} {p.name}" for p in products],
+        [f"#{p.id} {_short(p.name, 50)}" for p in products],
     )
-    selected = next(p for p in products if f"#{p.id} {p.name}" == choice)
+    selected = next(p for p in products if f"#{p.id} {_short(p.name, 50)}" == choice)
     frame = _history_frame(db_path, selected)
     if not frame.empty:
         fig = px.line(
             frame, x="checked_at", y="price", markers=True,
-            title=f"{selected.name} — price history (PKR)",
+            title=f"{_short(selected.name, 60)} — price history (PKR)",
             labels={"checked_at": "Checked at", "price": "Price (PKR)"},
         )
         if selected.target_price:
@@ -188,5 +220,7 @@ if products:
                 annotation_text=f"Target {selected.target_price:,.0f}",
             )
         st.plotly_chart(fig, width="stretch")
+        if len(frame) < 2:
+            st.caption("Only 1 check so far — press “Check prices now” again to build a trend.")
     else:
         st.info("No price history yet — press “Check prices now”.")

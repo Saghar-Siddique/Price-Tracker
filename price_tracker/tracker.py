@@ -49,7 +49,10 @@ def check_all(
             log.warning("Check failed for %s (%s): %s", product.name, product.url, exc)
             continue
 
-        if name and name != product.name:
+        if name and (not product.name or product.name == product.url):
+            # Fill in a missing name only. A name the user typed at add
+            # time must stick — overwriting it with the scraped page title
+            # (e.g. a 100-char Daraz title) is a bug, not a sync.
             db.update_product_name(db_path, product.id, name)
             product.name = name
 

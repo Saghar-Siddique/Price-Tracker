@@ -106,11 +106,23 @@ original list price — promotion/sale prices (like a Rs. 234 flash deal on a
 Rs. 1,000 item) are fetched by JavaScript after the page loads. So for
 daraz.pk, Price Tracker renders each product page in headless Chromium
 (Playwright) and reads the exact price a shopper sees: the promotion price
-when a discount is active, otherwise the regular price. If Playwright isn't
-installed, it falls back to static HTML extraction (`pdpTrackingData`
+when a discount is active, otherwise the regular price. If no browser can be
+launched, it falls back to static HTML extraction (`pdpTrackingData`
 embedded JSON, verified live on daraz.pk) with schema.org JSON-LD and visible
-price text as further fallbacks. Polite by default: browser User-Agent, 10s
+price text as further fallbacks — **but the static fallback returns the list
+price on a sale page, not the sale price** (verified live Nov 19, 2026: a
+Rs. 699 sale was recorded as Rs. 2,199 while no browser was available).
+The launcher first tries Playwright's bundled Chromium, then a system
+Chromium (`PLAYWRIGHT_CHROMIUM_PATH`, else `/usr/bin/chromium` and friends,
+`--no-sandbox` for containers). Polite by default: browser User-Agent, 10s
 timeout, one retry, 1s delay between products.
+
+### Deploy on Streamlit Cloud
+
+`packages.txt` installs Debian's `chromium` at deploy time so the rendered
+price path works on Streamlit Cloud (the `playwright` pip package alone does
+not ship a browser binary). Without it, Daraz checks silently fall back to
+static HTML and record list prices on sale pages.
 
 ## Project structure
 
@@ -125,6 +137,7 @@ price_tracker/
 dashboard_app.py # Streamlit dashboard (Plotly charts, seeded demo data)
 tests/
   fixtures/daraz_product.html  # realistic Daraz fixture (no network in tests)
+  fixtures/daraz_sale_product.html  # trimmed real sale page (sale Rs. 699 / list Rs. 2,199)
   fixtures/priceoye_product.html  # trimmed live PriceOye page
   fixtures/telemart_product.html  # trimmed live TeleX page
   test_scraper.py / test_stores.py / test_database.py / test_tracker.py / test_dashboard.py
