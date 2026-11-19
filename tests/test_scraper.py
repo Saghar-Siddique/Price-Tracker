@@ -281,13 +281,16 @@ def _serve_page(html: str):
     return server, f"http://127.0.0.1:{server.server_address[1]}/product.html"
 
 
-def _rendered_call(html: str, monkeypatch):
+def _rendered_call(html, monkeypatch, **kwargs):
     # Localhost must bypass the egress proxy or Chromium cannot load it.
     for var in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
         monkeypatch.delenv(var, raising=False)
-    server, url = _serve_page(html)
+    if isinstance(html, list):
+        server, url = _serve_counted_pages(html)
+    else:
+        server, url = _serve_page(html)
     try:
-        return scraper.fetch_rendered_price(url)
+        return scraper.fetch_rendered_price(url, **kwargs)
     except scraper.ScrapeError as exc:
         if "Could not launch Chromium" in str(exc) or "Executable doesn't exist" in str(exc):
             pytest.skip(f"no Chromium available: {exc}")
@@ -297,8 +300,8 @@ def _rendered_call(html: str, monkeypatch):
         server.server_close()
 
 
-def _rendered_price(html: str, monkeypatch) -> float:
-    name, price, currency = _rendered_call(html, monkeypatch)
+def _rendered_price(html, monkeypatch, **kwargs) -> float:
+    name, price, currency = _rendered_call(html, monkeypatch, **kwargs)
     assert "AirBuds_Pro" in name
     assert currency == "PKR"
     return price
@@ -347,7 +350,85 @@ def test_rendered_price_that_appears_late(monkeypatch):
 def test_rendered_price_failure_carries_page_snippet(monkeypatch):
     # No price ever appears: the failure must say what the page held,
     # so the dashboard warning can tell a bot check from an empty box.
+    # Small waits: the retry doubles every timeout, so the defaults
+    # (30s price wait) would make this one test take ~2 minutes.
     with pytest.raises(scraper.ScrapeError) as excinfo:
-        _rendered_call(_EMPTY_PAGE, monkeypatch)
+        _rendered_call(_EMPTY_PAGE, monkeypatch, price_wait_ms=1000, networkidle_ms=500)
     assert "Rendered page had no readable price" in str(excinfo.value)
     assert "verify you are human" in str(excinfo.value).lower()
+
+
+def _serve_counted_pages(pages: list[str]):
+    """Serve pages[0] on the first request, pages[1] on the second, ..."""
+    import http.server
+    import threading
+
+    state = {"n": 0}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            html = pages[min(state["n"], len(pages) - 1)]
+            state["n"] += 1
+            body = html.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}/product.html"
+
+
+def test_rendered_price_appears_after_reload(monkeypatch):
+    # First load: empty price box. Second load (the reload-and-retry):
+    # the price is there. Lazily rendered prices often appear on a
+    # second load.
+    assert (
+        _rendered_price(
+            [_EMPTY_PAGE, _CLASSIC_PAGE],
+            monkeypatch,
+            price_wait_ms=2000,
+            networkidle_ms=500,
+        )
+        == 699.0
+    )
+
+
+def _evaluate_on_page(html: str, js: str, monkeypatch) -> object:
+    """Evaluate JS on a locally served page in a real Chromium."""
+    for var in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        pytest.skip("playwright is not installed")
+    server, url = _serve_page(html)
+    try:
+        with sync_playwright() as p:
+            try:
+                browser = scraper._launch_browser(p)
+            except scraper.ScrapeError as exc:
+                pytest.skip(f"no Chromium available: {exc}")
+            try:
+                page = browser.new_page()
+                page.goto(url, timeout=30000, wait_until="domcontentloaded")
+                return page.evaluate(js)
+            finally:
+                browser.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_price_present_predicate_matches_real_pages(monkeypatch):
+    # The exact predicate the price wait uses: True once a price is
+    # readable, False on a price-less page. Guards the PR #7 escaping
+    # bug, where the predicate never matched and the wait silently
+    # burned its whole timeout on every page.
+    assert _evaluate_on_page(_CLASSIC_PAGE, scraper.PRICE_PRESENT_JS, monkeypatch) is True
+    assert _evaluate_on_page(_EMPTY_PAGE, scraper.PRICE_PRESENT_JS, monkeypatch) is False
