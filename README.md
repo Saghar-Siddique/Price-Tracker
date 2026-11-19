@@ -174,3 +174,5 @@ delay helps), respect `robots.txt`, and stop if a site asks you to.
 ## License
 
 MIT — do whatever you want with it.
+
+<!-- redeploy trigger: PR #9 catalog API fix -->
