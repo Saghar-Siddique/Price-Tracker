@@ -25,6 +25,9 @@ log = logging.getLogger(__name__)
 FetchFn = Callable[[str], tuple]
 
 
+# Exported for the dashboard: CheckOutcome tells the UI whether each
+# check used the rendered page or the static fallback, so a list price
+# recorded from static HTML is shown with a warning, never silently.
 @dataclass
 class CheckOutcome:
     """One product's result from a :func:`check_all` round.
