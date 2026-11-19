@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import database as db
 from .alerts import format_alert
-from .tracker import check_all
+from .tracker import CheckOutcome, check_all
 
 DEFAULT_DB = Path(os.environ.get("PRICE_TRACKER_DB", "prices.db"))
 
@@ -75,7 +75,17 @@ def cmd_check(args: argparse.Namespace) -> int:
         print("No products tracked yet. Add one with: price-tracker add <url>")
         return 0
     print(f"Checking {len(products)} product(s)...")
-    alerts = check_all(args.db)
+    report: list[CheckOutcome] = []
+    alerts = check_all(args.db, report=report)
+    for outcome in report:
+        if not outcome.ok:
+            print(f"  ! #{outcome.product_id} {outcome.product_name}: check failed ({outcome.error})")
+        elif outcome.rendered is False:
+            print(
+                f"  ! #{outcome.product_id} {outcome.product_name}: exact price unavailable "
+                f"({outcome.fallback_reason}) — recorded price may be the list price, "
+                "not a sale price."
+            )
     if alerts:
         print("\nAlerts:")
         for alert in alerts:

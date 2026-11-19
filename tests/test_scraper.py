@@ -63,7 +63,7 @@ def test_registry_dispatch_uses_daraz_extractor(monkeypatch):
 
     # force the static fallback path (no real Chromium in tests)
     monkeypatch.setattr(scraper, "fetch_rendered_price", no_browser)
-    name, price, currency = fetch_product_price(
+    name, price, currency, meta = fetch_product_price(
         "https://www.daraz.pk/products/some-thing-i123-s456.html"
     )
     assert (name, price, currency) == (
@@ -71,6 +71,8 @@ def test_registry_dispatch_uses_daraz_extractor(monkeypatch):
         495.0,
         "PKR",
     )
+    assert meta["rendered"] is False
+    assert "no browser in tests" in meta["fallback_reason"]
 
 
 def test_fetch_product_price_prefers_rendered(monkeypatch):
@@ -80,10 +82,11 @@ def test_fetch_product_price_prefers_rendered(monkeypatch):
         "fetch_rendered_price",
         lambda url, timeout_ms=30000: ("Promo Earphones", 234.0, "PKR"),
     )
-    name, price, currency = fetch_product_price(
+    name, price, currency, meta = fetch_product_price(
         "https://www.daraz.pk/products/x-i1-s2.html"
     )
     assert (name, price, currency) == ("Promo Earphones", 234.0, "PKR")
+    assert meta == {"rendered": True}
 
 
 def test_fetch_product_price_falls_back_to_static(monkeypatch):
@@ -94,10 +97,12 @@ def test_fetch_product_price_falls_back_to_static(monkeypatch):
 
     monkeypatch.setattr(scraper, "fetch_rendered_price", no_browser)
     monkeypatch.setattr(scraper, "_download", lambda url: html)
-    name, price, currency = fetch_product_price(
+    name, price, currency, meta = fetch_product_price(
         "https://www.daraz.pk/products/x-i1-s2.html"
     )
     assert price == 495.0
+    assert meta["rendered"] is False
+    assert meta["fallback_reason"] == "no browser"
 
 
 def test_fetch_rendered_price_without_playwright(monkeypatch):
@@ -181,9 +186,11 @@ def test_daraz_fetch_returns_list_price_when_browser_missing(monkeypatch):
     monkeypatch.setattr(
         scraper, "_download", lambda url: SALE_FIXTURE.read_text(encoding="utf-8")
     )
-    name, price, currency = scraper.DarazScraper().fetch(SALE_URL)
+    name, price, currency, meta = scraper.DarazScraper().fetch(SALE_URL)
     assert price == 2199.0
     assert currency == "PKR"
+    assert meta["rendered"] is False
+    assert meta["fallback_reason"] == "no browser"
 
 
 def test_launch_browser_falls_back_to_system_chromium(monkeypatch):
@@ -205,7 +212,8 @@ def test_launch_browser_falls_back_to_system_chromium(monkeypatch):
     assert scraper._launch_browser(FakeP()) == "fake-browser"
     assert calls[0].get("executable_path") is None  # bundled tried first
     assert calls[1]["executable_path"] == "/usr/bin/chromium"
-    assert calls[0]["args"] == ["--no-sandbox"]
+    assert calls[0]["args"] == scraper.CHROMIUM_ARGS
+    assert "--disable-dev-shm-usage" in scraper.CHROMIUM_ARGS
 
 
 def test_launch_browser_raises_when_nothing_works(monkeypatch):
@@ -221,3 +229,83 @@ def test_launch_browser_raises_when_nothing_works(monkeypatch):
     monkeypatch.setattr(os.path, "exists", lambda p: False)
     with pytest.raises(ScrapeError, match="Could not launch Chromium"):
         scraper._launch_browser(FakeP())
+
+
+# --- Rendered-price integration (real Chromium, local pages only) --------
+# Skipped where no browser can launch (CI has the playwright package but
+# no browser binary). Locally this runs the REAL render path against
+# fake Daraz pages served on 127.0.0.1.
+
+_CLASSIC_PAGE = """<html><head><title>AirBuds_Pro Wireless Earbuds | Daraz.pk</title></head>
+<body>
+<h1 class="pdp-mod-product-badge-title">AirBuds_Pro Wireless Earbuds</h1>
+<div class="pdp-product-price">
+  <span class="pdp-price pdp-price_type_normal">Rs. 699</span>
+  <span class="pdp-price pdp-price_type_deleted">Rs. 2,199</span>
+  <span class="pdp-discount">-68%</span>
+</div>
+</body></html>"""
+
+# Renamed classes: no "pdp-price" spans at all, plus a per-month
+# installment line inside the price box (must NOT be picked).
+_RENAMED_PAGE = """<html><head><title>AirBuds_Pro Wireless Earbuds | Daraz.pk</title></head>
+<body>
+<h1 class="pdp-mod-product-badge-title">AirBuds_Pro Wireless Earbuds</h1>
+<div class="pdp-product-price">
+  <span class="current-price">Rs. 699</span>
+  <span class="was-price"><s>Rs. 2,199</s></span>
+  <span class="off">-68%</span>
+  <span class="installment">Rs. 116/month</span>
+</div>
+</body></html>"""
+
+
+def _serve_page(html: str):
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = html.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}/product.html"
+
+
+def _rendered_price(html: str, monkeypatch) -> float:
+    # Localhost must bypass the egress proxy or Chromium cannot load it.
+    for var in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    server, url = _serve_page(html)
+    try:
+        name, price, currency = scraper.fetch_rendered_price(url)
+    except scraper.ScrapeError as exc:
+        if "Could not launch Chromium" in str(exc) or "Executable doesn't exist" in str(exc):
+            pytest.skip(f"no Chromium available: {exc}")
+        raise
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert "AirBuds_Pro" in name
+    assert currency == "PKR"
+    return price
+
+
+def test_rendered_price_classic_markup(monkeypatch):
+    assert _rendered_price(_CLASSIC_PAGE, monkeypatch) == 699.0
+
+
+def test_rendered_price_renamed_classes_falls_back_to_min(monkeypatch):
+    # No pdp-price classes: Strategy 3 (smallest Rs. amount in the price
+    # box) must find the 699 sale price, not the 2,199 original nor the
+    # 116/month installment.
+    assert _rendered_price(_RENAMED_PAGE, monkeypatch) == 699.0

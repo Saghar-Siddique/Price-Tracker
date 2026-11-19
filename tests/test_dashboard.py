@@ -57,3 +57,27 @@ def test_dashboard_shows_alert_banner_on_load(tmp_path, monkeypatch):
     at = _run(tmp_path, monkeypatch)
     assert len(at.warning) >= 1
     assert any("target reached" in str(w.value) for w in at.warning)
+
+
+def test_dashboard_shows_static_fallback_warning(tmp_path, monkeypatch):
+    from price_tracker.tracker import CheckOutcome
+
+    at = _run(tmp_path, monkeypatch)
+    at.session_state["check_report"] = [
+        CheckOutcome(1, "Test Earbuds", ok=True, rendered=False, fallback_reason="no browser here")
+    ]
+    at.run()
+    assert not at.exception, at.exception
+    assert any("exact (sale) price unavailable" in str(w.value) for w in at.warning)
+
+
+def test_dashboard_shows_failed_check_error(tmp_path, monkeypatch):
+    from price_tracker.tracker import CheckOutcome
+
+    at = _run(tmp_path, monkeypatch)
+    at.session_state["check_report"] = [
+        CheckOutcome(1, "Test Earbuds", ok=False, error="boom")
+    ]
+    at.run()
+    assert not at.exception, at.exception
+    assert any("price check failed" in str(e.value) for e in at.error)
