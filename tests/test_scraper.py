@@ -281,13 +281,13 @@ def _serve_page(html: str):
     return server, f"http://127.0.0.1:{server.server_address[1]}/product.html"
 
 
-def _rendered_price(html: str, monkeypatch) -> float:
+def _rendered_call(html: str, monkeypatch):
     # Localhost must bypass the egress proxy or Chromium cannot load it.
     for var in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
         monkeypatch.delenv(var, raising=False)
     server, url = _serve_page(html)
     try:
-        name, price, currency = scraper.fetch_rendered_price(url)
+        return scraper.fetch_rendered_price(url)
     except scraper.ScrapeError as exc:
         if "Could not launch Chromium" in str(exc) or "Executable doesn't exist" in str(exc):
             pytest.skip(f"no Chromium available: {exc}")
@@ -295,6 +295,10 @@ def _rendered_price(html: str, monkeypatch) -> float:
     finally:
         server.shutdown()
         server.server_close()
+
+
+def _rendered_price(html: str, monkeypatch) -> float:
+    name, price, currency = _rendered_call(html, monkeypatch)
     assert "AirBuds_Pro" in name
     assert currency == "PKR"
     return price
@@ -309,3 +313,41 @@ def test_rendered_price_renamed_classes_falls_back_to_min(monkeypatch):
     # box) must find the 699 sale price, not the 2,199 original nor the
     # 116/month installment.
     assert _rendered_price(_RENAMED_PAGE, monkeypatch) == 699.0
+
+
+# Price that renders LATE (4s after the title — past the old 2.5s settle).
+_LATE_PAGE = """<html><head><title>AirBuds_Pro Wireless Earbuds | Daraz.pk</title></head>
+<body>
+<h1 class="pdp-mod-product-badge-title">AirBuds_Pro Wireless Earbuds</h1>
+<div class="pdp-product-price"></div>
+<script>
+setTimeout(() => {
+  document.querySelector('.pdp-product-price').innerHTML =
+    '<span class="pdp-price pdp-price_type_normal">Rs. 699</span>' +
+    '<span class="pdp-price pdp-price_type_deleted">Rs. 2,199</span>';
+}, 4000);
+</script>
+</body></html>"""
+
+# Title loads, price box stays empty forever (bot check / blank variant).
+_EMPTY_PAGE = """<html><head><title>AirBuds_Pro Wireless Earbuds | Daraz.pk</title></head>
+<body>
+<h1 class="pdp-mod-product-badge-title">AirBuds_Pro Wireless Earbuds</h1>
+<div class="pdp-product-price"></div>
+<p>Please verify you are human to continue</p>
+</body></html>"""
+
+
+def test_rendered_price_that_appears_late(monkeypatch):
+    # The price renders 4s after the title — past the old 2.5s settle.
+    # The new price wait must hold the page open until it appears.
+    assert _rendered_price(_LATE_PAGE, monkeypatch) == 699.0
+
+
+def test_rendered_price_failure_carries_page_snippet(monkeypatch):
+    # No price ever appears: the failure must say what the page held,
+    # so the dashboard warning can tell a bot check from an empty box.
+    with pytest.raises(scraper.ScrapeError) as excinfo:
+        _rendered_call(_EMPTY_PAGE, monkeypatch)
+    assert "Rendered page had no readable price" in str(excinfo.value)
+    assert "verify you are human" in str(excinfo.value).lower()

@@ -111,8 +111,13 @@ price is picked by three strategies, in order: the standard
 ``pdp-price_type_normal`` element, the first non-deleted ``pdp-price``
 element, and — when Daraz renames its price classes — the smallest Rs.
 amount inside the price box (a sale price is always ≤ the original
-price; per-month installment amounts are excluded). If no browser can
-be launched, it falls back to static HTML extraction (`pdpTrackingData`
+price; per-month installment amounts are excluded). The browser waits
+for the price element itself (up to 15s), not just the title, because
+Daraz renders the price after the title — and if no price ever
+appears, the failure message carries a snippet of the page text, so
+the dashboard warning shows whether the page was a bot check or just
+an empty price box. If no browser can be launched, it falls back to
+static HTML extraction (`pdpTrackingData`
 embedded JSON, verified live on daraz.pk) with schema.org JSON-LD and
 visible price text as further fallbacks — **but the static fallback
 returns the list price on a sale page, not the sale price** (verified

@@ -195,9 +195,12 @@ def fetch_rendered_price(url: str, timeout_ms: int = 30000) -> tuple[str, float,
         ) from exc
 
     js = """() => {
-        const out = {name: null, sale: null};
+        const out = {name: null, sale: null, snippet: null};
         const nameEl = document.querySelector('h1.pdp-mod-product-badge-title');
         out.name = ((nameEl && nameEl.innerText) || document.title || '').trim();
+        // A short slice of the visible page text, for diagnosing a page
+        // that renders with no price (bot check? empty price box?).
+        out.snippet = (document.body ? document.body.innerText : '').replace(/\\s+/g, ' ').trim().slice(0, 200);
         // Strategy 1: standard PDP price block (Lazada/Daraz markup)
         const box = document.querySelector('.pdp-product-price');
         let saleEl = box && (
@@ -240,6 +243,19 @@ def fetch_rendered_price(url: str, timeout_ms: int = 30000) -> tuple[str, float,
                 page.wait_for_selector(
                     "h1.pdp-mod-product-badge-title", timeout=timeout_ms
                 )
+                # Wait for the PRICE itself, not just the title: Daraz
+                # renders the price client-side after the title, and on a
+                # slow connection it can take many seconds. If it never
+                # appears, carry on anyway — the strategies below still
+                # run, and the failure message will say what the page held.
+                try:
+                    page.wait_for_function(
+                        "() => { const box = document.querySelector('.pdp-product-price');"
+                        " return box && /(Rs\\\\.?|PKR)/.test(box.innerText); }",
+                        timeout=15000,
+                    )
+                except Exception:
+                    pass  # price never appeared; diagnose below from the page text
                 page.wait_for_timeout(2500)  # let the client-side price render
                 data = page.evaluate(js)
             finally:
@@ -251,7 +267,11 @@ def fetch_rendered_price(url: str, timeout_ms: int = 30000) -> tuple[str, float,
         raise ScrapeError(f"Could not read rendered price: {data}")
     name = data.get("name") or "Unknown product"
     if not data.get("sale"):
-        raise ScrapeError("Rendered page had no readable price")
+        snippet = (data.get("snippet") or "").strip()
+        raise ScrapeError(
+            "Rendered page had no readable price"
+            + (f" (page text: {snippet!r})" if snippet else " (page text was empty)")
+        )
     return name, parse_price(data["sale"]), "PKR"
 
 
