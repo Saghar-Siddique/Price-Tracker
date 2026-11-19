@@ -5,7 +5,7 @@ import pytest
 from price_tracker import database as db
 from price_tracker.alerts import Alert, format_alert
 from price_tracker.scraper import ScrapeError
-from price_tracker.tracker import check_all, current_alerts
+from price_tracker.tracker import CheckOutcome, check_all, current_alerts
 
 
 @pytest.fixture
@@ -83,6 +83,45 @@ def test_check_all_keeps_user_chosen_name(db_path):
     db.add_product(db_path, "https://x.test/a", name="Test Earbuds")
     check_all(db_path, fetch=_fake_fetch({"https://x.test/a": 100.0}))
     assert db.get_product(db_path, 1).name == "Test Earbuds"
+
+
+def test_check_all_report_records_fallback(db_path):
+    """A static-fallback check is reported as rendered=False with the
+    reason, so the UI can warn instead of silently trusting a list price."""
+    db.add_product(db_path, "https://x.test/a", name="A")
+
+    def fake_fetch(url):
+        return ("Fake Product", 100.0, "PKR", {"rendered": False, "fallback_reason": "no browser"})
+
+    report: list[CheckOutcome] = []
+    check_all(db_path, fetch=fake_fetch, report=report)
+    assert len(report) == 1
+    assert report[0].ok is True
+    assert report[0].rendered is False
+    assert report[0].fallback_reason == "no browser"
+    assert db.get_latest(db_path, 1).price == 100.0
+
+
+def test_check_all_report_records_rendered(db_path):
+    db.add_product(db_path, "https://x.test/a", name="A")
+
+    def fake_fetch(url):
+        return ("Fake Product", 100.0, "PKR", {"rendered": True})
+
+    report: list[CheckOutcome] = []
+    check_all(db_path, fetch=fake_fetch, report=report)
+    assert report[0].rendered is True
+    assert report[0].fallback_reason is None
+
+
+def test_check_all_report_records_failure(db_path):
+    db.add_product(db_path, "https://x.test/a", name="A")
+    db.add_product(db_path, "https://x.test/b", name="B")
+    report: list[CheckOutcome] = []
+    check_all(db_path, fetch=_fake_fetch({"https://x.test/b": 500.0}), report=report)
+    assert [o.ok for o in report] == [False, True]
+    assert "boom" in (report[0].error or "")
+    assert report[1].ok is True
 
 
 def test_format_alert():

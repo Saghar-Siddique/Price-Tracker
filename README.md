@@ -106,16 +106,25 @@ original list price — promotion/sale prices (like a Rs. 234 flash deal on a
 Rs. 1,000 item) are fetched by JavaScript after the page loads. So for
 daraz.pk, Price Tracker renders each product page in headless Chromium
 (Playwright) and reads the exact price a shopper sees: the promotion price
-when a discount is active, otherwise the regular price. If no browser can be
-launched, it falls back to static HTML extraction (`pdpTrackingData`
-embedded JSON, verified live on daraz.pk) with schema.org JSON-LD and visible
-price text as further fallbacks — **but the static fallback returns the list
-price on a sale page, not the sale price** (verified live Nov 19, 2026: a
-Rs. 699 sale was recorded as Rs. 2,199 while no browser was available).
-The launcher first tries Playwright's bundled Chromium, then a system
-Chromium (`PLAYWRIGHT_CHROMIUM_PATH`, else `/usr/bin/chromium` and friends,
-`--no-sandbox` for containers). Polite by default: browser User-Agent, 10s
-timeout, one retry, 1s delay between products.
+when a discount is active, otherwise the regular price. The rendered
+price is picked by three strategies, in order: the standard
+``pdp-price_type_normal`` element, the first non-deleted ``pdp-price``
+element, and — when Daraz renames its price classes — the smallest Rs.
+amount inside the price box (a sale price is always ≤ the original
+price; per-month installment amounts are excluded). If no browser can
+be launched, it falls back to static HTML extraction (`pdpTrackingData`
+embedded JSON, verified live on daraz.pk) with schema.org JSON-LD and
+visible price text as further fallbacks — **but the static fallback
+returns the list price on a sale page, not the sale price** (verified
+live Nov 19, 2026: a Rs. 699 sale was recorded as Rs. 2,199 while no
+browser was available). That fallback is never silent anymore: every
+check reports per product whether its price came from the rendered
+page, and the dashboard (and CLI) show a warning for any product whose
+price came from static HTML. The launcher first tries Playwright's
+bundled Chromium, then a system Chromium (`PLAYWRIGHT_CHROMIUM_PATH`,
+else `/usr/bin/chromium` and friends) with container flags
+(`--no-sandbox --disable-dev-shm-usage --disable-gpu`). Polite by default:
+browser User-Agent, 10s timeout, one retry, 1s delay between products.
 
 ### Deploy on Streamlit Cloud
 

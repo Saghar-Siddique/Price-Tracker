@@ -108,6 +108,11 @@ SYSTEM_CHROMIUM_PATHS = (
     "/usr/bin/google-chrome-stable",
 )
 
+#: Flags for launching Chromium in containers (Streamlit Cloud etc.):
+#: no sandbox (non-root container), /dev/shm is tiny (Chromium crashes
+#: on launch without the override), and no GPU.
+CHROMIUM_ARGS = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+
 
 def _browser_proxy() -> dict | None:
     """Playwright proxy config from environment, or None for direct.
@@ -140,7 +145,7 @@ def _launch_browser(p):
     containers. Raises ScrapeError when no browser can be launched.
     """
     candidates: list[dict] = [
-        {"headless": True, "proxy": _browser_proxy(), "args": ["--no-sandbox"]}
+        {"headless": True, "proxy": _browser_proxy(), "args": CHROMIUM_ARGS}
     ]
     paths = [os.environ["PLAYWRIGHT_CHROMIUM_PATH"]] if os.environ.get("PLAYWRIGHT_CHROMIUM_PATH") else []
     paths += [c for c in SYSTEM_CHROMIUM_PATHS if os.path.exists(c)]
@@ -149,7 +154,7 @@ def _launch_browser(p):
             {
                 "headless": True,
                 "proxy": _browser_proxy(),
-                "args": ["--no-sandbox"],
+                "args": CHROMIUM_ARGS,
                 "executable_path": path,
             }
         )
@@ -206,7 +211,23 @@ def fetch_rendered_price(url: str, timeout_ms: int = 30000) -> tuple[str, float,
                 .filter(e => e.innerText && /(Rs\\.?|PKR)/.test(e.innerText));
             saleEl = all.find(e => !/deleted|strike/i.test(e.className)) || all[0] || null;
         }
-        out.sale = (saleEl && saleEl.innerText || '').trim() || null;
+        // Strategy 3: the sale price is the smallest Rs. amount in the
+        // price box (a sale price is always <= the original price). Only
+        // used when the class-based rules found nothing — e.g. Daraz
+        // renames its price classes. Per-month installment amounts
+        // ("Rs. 116/month") are excluded: they are not the selling price.
+        let saleText = null;
+        if (!saleEl && box) {
+            const amounts = [];
+            const re = /(?:Rs\\.?|PKR)\\s?([\\d,]+(?:\\.\\d{1,2})?)/g;
+            let m;
+            while ((m = re.exec(box.innerText)) !== null) {
+                if (box.innerText[m.index + m[0].length] === '/') continue;
+                amounts.push(parseFloat(m[1].replace(/,/g, '')));
+            }
+            if (amounts.length) saleText = 'Rs. ' + Math.min(...amounts).toLocaleString('en-US');
+        }
+        out.sale = (saleEl && saleEl.innerText || '').trim() || saleText;
         return out;
     }"""
     try:
@@ -373,13 +394,26 @@ class DarazScraper(BaseScraper):
             raise ScrapeError("Could not find the product price on the page")
         return name, price, currency
 
-    def fetch(self, url: str) -> tuple[str, float, str]:
-        """Render in Chromium for the exact selling price; static fallback."""
+    def fetch(self, url: str) -> tuple[str, float, str, dict]:
+        """Render in Chromium for the exact selling price; static fallback.
+
+        Returns ``(name, price, currency, meta)`` where ``meta`` says
+        whether the price came from the rendered page (``rendered=True``)
+        or the static fallback (``rendered=False`` plus a human-readable
+        ``fallback_reason``). The static fallback returns the LIST price
+        on sale pages — callers must surface that, never record it
+        silently (see :func:`tracker.check_all`'s report).
+        """
         try:
-            return fetch_rendered_price(url)
+            name, price, currency = fetch_rendered_price(url)
+            return name, price, currency, {"rendered": True}
         except ScrapeError as exc:
             log.warning("JS render failed (%s); falling back to static HTML", exc)
-        return self.extract(_download(url))
+            name, price, currency = self.extract(_download(url))
+            return name, price, currency, {
+                "rendered": False,
+                "fallback_reason": str(exc),
+            }
 
 
 @register_scraper
@@ -540,7 +574,7 @@ extract_daraz = DarazScraper.extract
 extract_generic = GenericScraper.extract
 
 
-def fetch_product_price(url: str) -> tuple[str, float, str]:
+def fetch_product_price(url: str) -> tuple[str, float, str] | tuple[str, float, str, dict]:
     """Scrape (name, price, currency) for a product URL.
 
     Dispatches to the registered scraper for the URL's domain: Daraz
@@ -548,5 +582,10 @@ def fetch_product_price(url: str) -> tuple[str, float, str]:
     price when a discount is active, otherwise the regular price, with a
     static-HTML fallback); PriceOye and Telemart parse static HTML;
     unknown shops use the generic JSON-LD extractor.
+
+    JS-rendered shops (Daraz) return a 4th element, a ``meta`` dict:
+    ``{"rendered": True}`` when the price came from the rendered page,
+    or ``{"rendered": False, "fallback_reason": ...}`` when the static
+    fallback ran (the price is then the LIST price on a sale page).
     """
     return get_scraper(url).fetch(url)

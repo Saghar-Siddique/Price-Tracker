@@ -21,7 +21,7 @@ import streamlit as st
 from price_tracker import database as db
 from price_tracker.alerts import format_alert
 from price_tracker.models import Product
-from price_tracker.tracker import check_all, current_alerts
+from price_tracker.tracker import CheckOutcome, check_all, current_alerts
 
 st.set_page_config(page_title="Price Tracker", page_icon="🏷️", layout="wide")
 
@@ -143,7 +143,9 @@ with st.sidebar:
     st.header("🔄 Price check")
     if st.button("Check prices now"):
         with st.spinner("Rendering pages in headless browser for exact prices..."):
-            st.session_state["alerts"] = check_all(db_path)
+            report: list[CheckOutcome] = []
+            st.session_state["alerts"] = check_all(db_path, report=report)
+            st.session_state["check_report"] = report
         st.success("Check complete.")
         st.rerun()
 
@@ -192,6 +194,19 @@ if alerts:
     st.subheader("🔔 Latest alerts")
     for a in alerts:
         st.warning(format_alert(a))
+
+# ---- check report: per-product outcomes from the last "Check prices now"
+# A static-fallback warning is shown, not hidden: a recorded price that
+# came from static HTML may be the list price, not the sale price.
+for outcome in st.session_state.get("check_report", []):
+    if not outcome.ok:
+        st.error(f"❌ {outcome.product_name}: price check failed ({outcome.error}). Previous price kept.")
+    elif outcome.rendered is False:
+        st.warning(
+            f"⚠️ {outcome.product_name}: exact (sale) price unavailable "
+            f"({outcome.fallback_reason}) — recorded price may be the list "
+            "price, not the sale price, so target alerts may not fire."
+        )
 
 # ---- overview table
 st.subheader("📦 Tracked products")
