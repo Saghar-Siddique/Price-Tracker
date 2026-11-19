@@ -1,4 +1,4 @@
-"""Price Tracker — track Daraz.pk product prices over time.
+"""Price Tracker — track product prices across Pakistani stores over time.
 
 Scrape product prices, store timestamped history in SQLite, and get
 alerts on price drops. Ships with a CLI and a Streamlit dashboard.

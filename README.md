@@ -3,25 +3,58 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
 [![CI](https://github.com/Saghar-Siddique/Price-Tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/Saghar-Siddique/Price-Tracker/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-30%20passing-brightgreen)](https://github.com/Saghar-Siddique/Price-Tracker/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-47%20passing-brightgreen)](https://github.com/Saghar-Siddique/Price-Tracker/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
-**Never overpay again.** Track Daraz.pk product prices over time — add a
-product link, and Price Tracker scrapes the current price on demand, stores
-every check in SQLite, charts the trend, and alerts you on price drops or
-when your target price is hit.
+**Never overpay again.** Track product prices across Pakistani stores over
+time — add a product link, and Price Tracker scrapes the current price on
+demand, stores every check in SQLite, charts the trend, and alerts you on
+price drops or when your target price is hit.
 
 **Perfect for:** bargain hunters, resellers tracking competitor prices, and
 anyone who wants to buy at the right moment.
 
 ## Features
 
-- 🕷️ **Daraz.pk scraper** — exact selling prices via headless Chromium (Playwright): promotion/discount prices when a sale is active, regular price otherwise
+- 🕷️ **Multi-store scrapers** — Daraz.pk (exact selling prices via headless Chromium/Playwright: promotion/discount prices when a sale is active, regular price otherwise), PriceOye.pk and Telemart.pk (static HTML, verified live)
+- 🧩 **Plugin system** — every store is one `BaseScraper` class; adding a store needs no CLI/dashboard changes (see below)
 - 🗄️ **Price history in SQLite** — every check timestamped, queryable, yours
 - 📊 **Streamlit dashboard** — product table, Plotly trend charts with target-price line, alerts panel
 - 🔔 **Smart alerts** — price-drop % vs last check, plus target-price hits
 - 🖥️ **Full CLI** — add / list / remove / check / history / report
-- 🧪 **Tested** — 30 pytest tests with fixture-based scraper tests (no network in tests); CI runs the suite on every push and PR
+- 🧪 **Tested** — 47 pytest tests with fixture-based scraper tests (no network in tests); CI runs the suite on every push and PR
+
+## Supported stores
+
+| Store | What it tracks | How the price is read |
+|---|---|---|
+| Daraz.pk | Any product page | Headless Chromium (exact selling price, incl. promotions); static HTML fallback |
+| PriceOye.pk | Mobiles | schema.org JSON-LD Product block (verified live) |
+| Telemart.pk / TeleX | Any product page | Sale-price block (`product-price__sale`); embedded variant JSON fallback |
+
+Unknown shops fall back to a generic schema.org JSON-LD extractor.
+
+### Adding a new store
+
+One class, nothing else — the CLI, dashboard, and tracker never change:
+
+```python
+from price_tracker.scraper import BaseScraper, register_scraper
+
+@register_scraper
+class MyStoreScraper(BaseScraper):
+    name = "MyStore"
+    domains = ("mystore.pk",)
+
+    @staticmethod
+    def extract(html: str) -> tuple[str, float, str]:
+        # parse (name, price, currency) from the product page HTML
+        ...
+```
+
+If the shop renders prices client-side, override `fetch()` instead (see
+`DarazScraper`). Add a fixture + tests in `tests/test_stores.py` and the
+store works end-to-end through `check_all` immediately.
 
 ## Screenshots
 
@@ -83,14 +116,16 @@ timeout, one retry, 1s delay between products.
 price_tracker/
   models.py      # Product / PricePoint dataclasses
   database.py    # SQLite schema + CRUD
-  scraper.py     # domain-keyed extractors (Daraz first) + polite fetching
+  scraper.py     # BaseScraper plugins (Daraz, PriceOye, Telemart, generic) + registry + polite fetching
   tracker.py     # check_all(): scrape → store → alerts
   alerts.py      # Alert model + formatting
   cli.py         # argparse interface
 dashboard_app.py # Streamlit dashboard (Plotly charts, seeded demo data)
 tests/
   fixtures/daraz_product.html  # realistic Daraz fixture (no network in tests)
-  test_scraper.py / test_database.py / test_tracker.py / test_dashboard.py
+  fixtures/priceoye_product.html  # trimmed live PriceOye page
+  fixtures/telemart_product.html  # trimmed live TeleX page
+  test_scraper.py / test_stores.py / test_database.py / test_tracker.py / test_dashboard.py
 data/sample_products.csv       # 3 real Daraz URLs to try
 ```
 
