@@ -12,10 +12,19 @@ extractors can be unit-tested against saved fixtures without any
 network access.
 
 Daraz note: promotion/sale prices are rendered client-side and never appear
-in the static HTML, so daraz.pk URLs are rendered in headless Chromium
-(Playwright) to always capture the exact selling price — the promotion price
-when a discount is active, otherwise the regular price. Static HTML
-extraction remains as a fallback when Playwright isn't installed.
+in the static HTML, so daraz.pk URLs used to be rendered in headless
+Chromium (Playwright). That proved unreliable on Streamlit Cloud — the
+price box stays empty in the headless render even after a 30s wait plus
+a reload (re-tests #4/#5, Nov 19, 2026). The exact selling price now
+comes from Daraz's own catalog search instead: searching the catalog
+endpoint for the product's numeric item id returns exactly that item,
+with its exact selling ``price`` and ``originalPrice`` — one plain HTTP
+GET, no browser, no waiting (verified live Nov 19, 2026: q=1983435427
+returned one item, price 699 vs original 2199). The Chromium render
+remains as a second attempt; the static HTML price is NEVER recorded —
+it is the LIST price on sale pages, so when neither source can
+determine the exact price the fetch fails loudly instead of recording
+a wrong price.
 
 Politeness defaults: a real browser User-Agent, a 10s request timeout
 (Daraz pages measured ~3-6s in testing — 2s flakes), one retry, and a
@@ -96,6 +105,63 @@ def _download(url: str) -> str:
             log.warning("Attempt %d failed for %s: %s", attempt + 1, url, exc)
             time.sleep(1)
     raise ScrapeError(f"Failed to download {url}: {last_error}")
+
+
+#: Daraz catalog search (plain HTTP, no browser): searching for a
+#: product's numeric item id returns exactly that item, with its exact
+#: selling ``price`` and ``originalPrice``. Verified live 19 Nov 2026:
+#: ``q=1983435427`` returned one item — price 699 (sale) vs original
+#: 2199. The item id is parsed from the product URL (``-i<itemId>-``).
+DARAZ_CATALOG_URL = "https://www.daraz.pk/catalog/"
+DARAZ_ITEM_ID_RE = re.compile(r"-i(\d+)(?:-|\.html)")
+
+
+def fetch_daraz_catalog_price(url: str) -> tuple[str, float, str]:
+    """Exact Daraz selling price via the catalog search API (no browser).
+
+    Daraz's own catalog endpoint answers a search for the product's
+    numeric item id with exactly that item, including its exact selling
+    ``price`` (the promotion price when a discount is active, otherwise
+    the regular price) and ``originalPrice``. One plain HTTP GET — no
+    Chromium, no waiting, no flakiness.
+
+    Raises ScrapeError when the URL has no item id, the request fails,
+    the response is not the expected JSON, or the item is not in the
+    results.
+    """
+    match = DARAZ_ITEM_ID_RE.search(url)
+    if not match:
+        raise ScrapeError(f"No Daraz item id in URL: {url}")
+    item_id = match.group(1)
+    try:
+        resp = requests.get(
+            DARAZ_CATALOG_URL,
+            params={"ajax": "true", "page": "1", "q": item_id},
+            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+            timeout=REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as exc:
+        raise ScrapeError(
+            f"Daraz catalog lookup failed for item {item_id}: {exc}"
+        ) from exc
+    except ValueError as exc:
+        raise ScrapeError(
+            f"Daraz catalog returned non-JSON for item {item_id}"
+        ) from exc
+    items = (data.get("mods") or {}).get("listItems") or []
+    for item in items:
+        if str(item.get("itemId")) == item_id:
+            name = (item.get("name") or "").strip() or "Unknown product"
+            try:
+                price = float(item["price"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ScrapeError(
+                    f"Daraz catalog item {item_id} has no usable price"
+                ) from exc
+            return name, price, "PKR"
+    raise ScrapeError(f"Daraz catalog has no item {item_id}")
 
 
 #: System Chromium paths tried when Playwright's bundled browser is
@@ -383,7 +449,13 @@ def supported_stores() -> list[str]:
 
 @register_scraper
 class DarazScraper(BaseScraper):
-    """Scraper for Daraz.pk — exact selling price via headless Chromium."""
+    """Scraper for Daraz.pk — exact selling price via the catalog API.
+
+    First attempt: Daraz's own catalog search for the product's item id
+    (one plain HTTP GET, no browser). Second attempt: headless Chromium
+    render. Never the static HTML price — it is the LIST price on sale
+    pages, so a failed check raises instead of recording a wrong price.
+    """
 
     name = "Daraz"
     domains = ("daraz.pk",)
@@ -399,9 +471,11 @@ class DarazScraper(BaseScraper):
 
         WARNING: ``pdt_price`` is the LIST price — on a sale page it is
         the struck-through original price, not the selling price (the
-        sale price never appears in the static HTML). This extractor is
-        only a last-resort fallback; the exact selling price comes from
-        the rendered page via :func:`fetch_rendered_price`.
+        sale price never appears in the static HTML). The exact selling
+        price comes from the catalog API (:func:`fetch_daraz_catalog_price`)
+        or the rendered page (:func:`fetch_rendered_price`); this
+        extractor is kept for the product NAME and for tests, and its
+        price must never be recorded as the current price.
         """
         soup = BeautifulSoup(html, "lxml")
         name: str | None = None
@@ -451,25 +525,34 @@ class DarazScraper(BaseScraper):
         return name, price, currency
 
     def fetch(self, url: str) -> tuple[str, float, str, dict]:
-        """Render in Chromium for the exact selling price; static fallback.
+        """Exact Daraz selling price: catalog API first, render second.
 
-        Returns ``(name, price, currency, meta)`` where ``meta`` says
-        whether the price came from the rendered page (``rendered=True``)
-        or the static fallback (``rendered=False`` plus a human-readable
-        ``fallback_reason``). The static fallback returns the LIST price
-        on sale pages — callers must surface that, never record it
-        silently (see :func:`tracker.check_all`'s report).
+        Returns ``(name, price, currency, meta)`` where ``meta`` is
+        ``{"rendered": True, "source": "catalog"}`` when the price came
+        from Daraz's own catalog data, or ``{"rendered": True,
+        "source": "render"}`` for the Chromium path. Raises ScrapeError
+        when neither source can determine the exact price — the static
+        page's ``pdt_price`` is the LIST price on sale pages and is
+        deliberately NEVER recorded as the current price, so a failed
+        check keeps the previous price and surfaces an error instead of
+        silently storing a wrong one (see :func:`tracker.check_all`).
         """
+        errors: list[str] = []
+        try:
+            name, price, currency = fetch_daraz_catalog_price(url)
+            return name, price, currency, {"rendered": True, "source": "catalog"}
+        except ScrapeError as exc:
+            errors.append(f"catalog: {exc}")
         try:
             name, price, currency = fetch_rendered_price(url)
-            return name, price, currency, {"rendered": True}
+            return name, price, currency, {"rendered": True, "source": "render"}
         except ScrapeError as exc:
-            log.warning("JS render failed (%s); falling back to static HTML", exc)
-            name, price, currency = self.extract(_download(url))
-            return name, price, currency, {
-                "rendered": False,
-                "fallback_reason": str(exc),
-            }
+            errors.append(f"render: {exc}")
+        raise ScrapeError(
+            f"Exact (sale) price unavailable for {url} — "
+            + "; ".join(errors)
+            + ". The static page only carries the list price, which is not recorded."
+        )
 
 
 @register_scraper
@@ -634,14 +717,14 @@ def fetch_product_price(url: str) -> tuple[str, float, str] | tuple[str, float, 
     """Scrape (name, price, currency) for a product URL.
 
     Dispatches to the registered scraper for the URL's domain: Daraz
-    renders in headless Chromium for the exact selling price (promotion
-    price when a discount is active, otherwise the regular price, with a
-    static-HTML fallback); PriceOye and Telemart parse static HTML;
-    unknown shops use the generic JSON-LD extractor.
+    reads the exact selling price from its catalog API first (promotion
+    price when a discount is active, otherwise the regular price), with
+    a headless-Chromium render as the second attempt — and raises
+    instead of ever recording the static list price; PriceOye and
+    Telemart parse static HTML; unknown shops use the generic JSON-LD
+    extractor.
 
     JS-rendered shops (Daraz) return a 4th element, a ``meta`` dict:
-    ``{"rendered": True}`` when the price came from the rendered page,
-    or ``{"rendered": False, "fallback_reason": ...}`` when the static
-    fallback ran (the price is then the LIST price on a sale page).
+    ``{"rendered": True, "source": "catalog"|"render"}``.
     """
     return get_scraper(url).fetch(url)

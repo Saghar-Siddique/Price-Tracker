@@ -18,13 +18,13 @@ anyone who wants to buy at the right moment.
 
 ## Features
 
-- 🕷️ **Multi-store scrapers** — Daraz.pk (exact selling prices via headless Chromium/Playwright: promotion/discount prices when a sale is active, regular price otherwise), PriceOye.pk and Telemart.pk (static HTML, verified live)
+- 🕷️ **Multi-store scrapers** — Daraz.pk (exact selling prices via its catalog API first, headless Chromium/Playwright render second: promotion/discount prices when a sale is active, regular price otherwise; the static list price is never recorded), PriceOye.pk and Telemart.pk (static HTML, verified live)
 - 🧩 **Plugin system** — every store is one `BaseScraper` class; adding a store needs no CLI/dashboard changes (see below)
 - 🗄️ **Price history in SQLite** — every check timestamped, queryable, yours
 - 📊 **Streamlit dashboard** — product table, Plotly trend charts with target-price line, alerts panel
 - 🔔 **Smart alerts** — price-drop % vs last check, plus target-price hits
 - 🖥️ **Full CLI** — add / list / remove / check / history / report
-- 🧪 **Tested** — 47 pytest tests with fixture-based scraper tests (no network in tests); CI runs the suite on every push and PR
+- 🧪 **Tested** — 69 pytest tests with fixture-based scraper tests (no network in tests); CI runs the suite on every push and PR
 
 ## Supported stores
 
@@ -102,46 +102,47 @@ Sample products to try: [`data/sample_products.csv`](data/sample_products.csv).
 ## How the Daraz scraper works
 
 Daraz renders its prices client-side: the static HTML only ever contains the
-original list price — promotion/sale prices (like a Rs. 234 flash deal on a
-Rs. 1,000 item) are fetched by JavaScript after the page loads. So for
-daraz.pk, Price Tracker renders each product page in headless Chromium
-(Playwright) and reads the exact price a shopper sees: the promotion price
-when a discount is active, otherwise the regular price. The rendered
-price is picked by three strategies, in order: the standard
-``pdp-price_type_normal`` element, the first non-deleted ``pdp-price``
-element, and — when Daraz renames its price classes — the smallest Rs.
-amount inside the price box (a sale price is always ≤ the original
-price; per-month installment amounts are excluded). The browser waits
-for the price element itself (up to 30s), not just the title, because
-Daraz renders the price after the title — it also waits for the
-network to settle first (best-effort, capped at 15s), and if the page
-loads but no price appears it reloads once and tries again: lazily
-rendered prices often appear on a second load. If no price ever
-appears, the failure message carries a snippet of the page text, so
-the dashboard warning shows whether the page was a bot check or just
-an empty price box. A check can therefore take a few minutes when
-Daraz is slow — the dashboard spinner says so while it runs. If no
-browser can be launched, it falls back to static HTML extraction
-(`pdpTrackingData`
-embedded JSON, verified live on daraz.pk) with schema.org JSON-LD and
-visible price text as further fallbacks — **but the static fallback
-returns the list price on a sale page, not the sale price** (verified
-live Nov 19, 2026: a Rs. 699 sale was recorded as Rs. 2,199 while no
-browser was available). That fallback is never silent anymore: every
-check reports per product whether its price came from the rendered
-page, and the dashboard (and CLI) show a warning for any product whose
-price came from static HTML. The launcher first tries Playwright's
-bundled Chromium, then a system Chromium (`PLAYWRIGHT_CHROMIUM_PATH`,
-else `/usr/bin/chromium` and friends) with container flags
-(`--no-sandbox --disable-dev-shm-usage --disable-gpu`). Polite by default:
-browser User-Agent, 10s timeout, one retry, 1s delay between products.
+original list price — promotion/sale prices (like a Rs. 699 flash deal on a
+Rs. 2,199 item) are fetched by JavaScript after the page loads. The exact
+selling price now comes from Daraz's own catalog search first: the scraper
+parses the product's numeric item id from its URL (``-i<itemId>-``) and
+searches the catalog endpoint (`/catalog/?ajax=true&q=<itemId>`), which
+returns exactly that item with its exact selling ``price`` and
+``originalPrice`` — one plain HTTP GET, no browser, no waiting (verified
+live Nov 19, 2026: `q=1983435427` returned one item, price 699 vs
+original 2199). If the catalog misses, the page is rendered in headless
+Chromium (Playwright) as a second attempt: the price is picked by three
+strategies, in order — the standard ``pdp-price_type_normal`` element,
+the first non-deleted ``pdp-price`` element, and (when Daraz renames its
+price classes) the smallest Rs. amount inside the price box (a sale
+price is always ≤ the original price; per-month installment amounts are
+excluded). The browser waits for the price element itself (up to 30s),
+not just the title, because Daraz renders the price after the title —
+it also waits for the network to settle first (best-effort, capped at
+15s), and if the page loads but no price appears it reloads once and
+tries again. If no price ever appears, the failure message carries a
+snippet of the page text, so the check error shows whether the page was
+a bot check or just an empty price box.
+
+The render path proved unreliable on Streamlit Cloud — the price box
+stays empty in the headless render even after the 30s wait plus a reload
+(live re-tests #4/#5, Nov 19, 2026) — which is why the catalog API is
+now the first attempt. And the static HTML price is NEVER recorded
+anymore: it is the list price on sale pages, so when neither the catalog
+nor the render can determine the exact price, the check fails loudly
+(previous price kept, error shown) instead of silently storing a wrong
+price. The launcher first tries Playwright's bundled Chromium, then a
+system Chromium (`PLAYWRIGHT_CHROMIUM_PATH`, else `/usr/bin/chromium`
+and friends) with container flags (`--no-sandbox --disable-dev-shm-usage
+--disable-gpu`). Polite by default: browser User-Agent, 10s timeout,
+one retry, 1s delay between products.
 
 ### Deploy on Streamlit Cloud
 
 `packages.txt` installs Debian's `chromium` at deploy time so the rendered
 price path works on Streamlit Cloud (the `playwright` pip package alone does
-not ship a browser binary). Without it, Daraz checks silently fall back to
-static HTML and record list prices on sale pages.
+not ship a browser binary). Without it, Daraz checks use the catalog API
+first and only fall back to the render when the catalog misses.
 
 ## Project structure
 
@@ -157,6 +158,7 @@ dashboard_app.py # Streamlit dashboard (Plotly charts, seeded demo data)
 tests/
   fixtures/daraz_product.html  # realistic Daraz fixture (no network in tests)
   fixtures/daraz_sale_product.html  # trimmed real sale page (sale Rs. 699 / list Rs. 2,199)
+  fixtures/daraz_catalog_search.json  # catalog API response for the same sale item (price 699)
   fixtures/priceoye_product.html  # trimmed live PriceOye page
   fixtures/telemart_product.html  # trimmed live TeleX page
   test_scraper.py / test_stores.py / test_database.py / test_tracker.py / test_dashboard.py

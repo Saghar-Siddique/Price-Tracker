@@ -55,54 +55,75 @@ def test_extract_daraz_json_ld_name_fallback():
 
 
 def test_registry_dispatch_uses_daraz_extractor(monkeypatch):
-    html = FIXTURE.read_text(encoding="utf-8")
-    monkeypatch.setattr(scraper, "_download", lambda url: html)
-
-    def no_browser(url, timeout_ms=30000):
-        raise ScrapeError("no browser in tests")
-
-    # force the static fallback path (no real Chromium in tests)
-    monkeypatch.setattr(scraper, "fetch_rendered_price", no_browser)
+    """Registry dispatch: a daraz.pk URL reaches DarazScraper, whose
+    catalog path returns the exact sale price (no browser needed)."""
+    monkeypatch.setattr(
+        scraper,
+        "fetch_daraz_catalog_price",
+        lambda url: ("AirBuds_Pro Wireless Earbuds", 699.0, "PKR"),
+    )
     name, price, currency, meta = fetch_product_price(
-        "https://www.daraz.pk/products/some-thing-i123-s456.html"
+        "https://www.daraz.pk/products/some-thing-i1983435427-s14073966757.html"
     )
-    assert (name, price, currency) == (
-        "Sensodyne Original Toothpaste 100gm",
-        495.0,
-        "PKR",
-    )
-    assert meta["rendered"] is False
-    assert "no browser in tests" in meta["fallback_reason"]
+    assert (name, price, currency) == ("AirBuds_Pro Wireless Earbuds", 699.0, "PKR")
+    assert meta == {"rendered": True, "source": "catalog"}
 
 
-def test_fetch_product_price_prefers_rendered(monkeypatch):
-    # Playwright path returns the exact (possibly promotion) price
+def test_fetch_product_price_prefers_catalog(monkeypatch):
+    """Catalog beats the render: when the catalog answers, Chromium is
+    never even launched."""
+    render_calls = []
+    monkeypatch.setattr(
+        scraper,
+        "fetch_daraz_catalog_price",
+        lambda url: ("Catalog Earphones", 699.0, "PKR"),
+    )
     monkeypatch.setattr(
         scraper,
         "fetch_rendered_price",
-        lambda url, timeout_ms=30000: ("Promo Earphones", 234.0, "PKR"),
+        lambda url, **kwargs: render_calls.append(url) or ("Promo Earphones", 234.0, "PKR"),
+    )
+    name, price, currency, meta = fetch_product_price(
+        "https://www.daraz.pk/products/x-i1983435427-s2.html"
+    )
+    assert (name, price, currency) == ("Catalog Earphones", 699.0, "PKR")
+    assert meta == {"rendered": True, "source": "catalog"}
+    assert render_calls == []
+
+
+def test_fetch_product_price_falls_back_to_render(monkeypatch):
+    """When the catalog misses (item not in results), the Chromium
+    render is the second attempt."""
+    def no_catalog(url):
+        raise ScrapeError("Daraz catalog has no item 1")
+
+    monkeypatch.setattr(scraper, "fetch_daraz_catalog_price", no_catalog)
+    monkeypatch.setattr(
+        scraper,
+        "fetch_rendered_price",
+        lambda url, **kwargs: ("Promo Earphones", 234.0, "PKR"),
     )
     name, price, currency, meta = fetch_product_price(
         "https://www.daraz.pk/products/x-i1-s2.html"
     )
     assert (name, price, currency) == ("Promo Earphones", 234.0, "PKR")
-    assert meta == {"rendered": True}
+    assert meta == {"rendered": True, "source": "render"}
 
 
-def test_fetch_product_price_falls_back_to_static(monkeypatch):
-    html = FIXTURE.read_text(encoding="utf-8")
+def test_fetch_product_price_raises_when_catalog_and_render_fail(monkeypatch):
+    """Neither source can determine the exact price: the fetch RAISES
+    instead of recording the static list price (the old behaviour that
+    stored Rs. 2,199 for a Rs. 699 product)."""
+    def no_catalog(url):
+        raise ScrapeError("Daraz catalog has no item 1")
 
-    def no_browser(url, timeout_ms=30000):
+    def no_browser(url, **kwargs):
         raise ScrapeError("no browser")
 
+    monkeypatch.setattr(scraper, "fetch_daraz_catalog_price", no_catalog)
     monkeypatch.setattr(scraper, "fetch_rendered_price", no_browser)
-    monkeypatch.setattr(scraper, "_download", lambda url: html)
-    name, price, currency, meta = fetch_product_price(
-        "https://www.daraz.pk/products/x-i1-s2.html"
-    )
-    assert price == 495.0
-    assert meta["rendered"] is False
-    assert meta["fallback_reason"] == "no browser"
+    with pytest.raises(ScrapeError, match="Exact \\(sale\\) price unavailable"):
+        fetch_product_price("https://www.daraz.pk/products/x-i1-s2.html")
 
 
 def test_fetch_rendered_price_without_playwright(monkeypatch):
@@ -176,21 +197,106 @@ def test_daraz_static_returns_list_price_on_sale_page():
     assert currency == "PKR"
 
 
-def test_daraz_fetch_returns_list_price_when_browser_missing(monkeypatch):
-    """Mirrors the live failure exactly: with no browser available, the
-    Daraz fetch falls back to static HTML and records the list price."""
+def test_daraz_fetch_raises_when_browser_missing_and_catalog_misses(monkeypatch):
+    """Mirrors the live failure exactly: with no browser available AND
+    the catalog missing the item, the Daraz fetch raises — it must NOT
+    fall back to the static list price (Rs. 2,199 for a Rs. 699
+    product)."""
+    def no_catalog(url):
+        raise ScrapeError("Daraz catalog has no item 1983435427")
+
     def no_browser(url, timeout_ms=30000):
         raise ScrapeError("no browser")
 
+    monkeypatch.setattr(scraper, "fetch_daraz_catalog_price", no_catalog)
     monkeypatch.setattr(scraper, "fetch_rendered_price", no_browser)
-    monkeypatch.setattr(
-        scraper, "_download", lambda url: SALE_FIXTURE.read_text(encoding="utf-8")
-    )
-    name, price, currency, meta = scraper.DarazScraper().fetch(SALE_URL)
-    assert price == 2199.0
+    with pytest.raises(ScrapeError, match="Exact \\(sale\\) price unavailable"):
+        scraper.DarazScraper().fetch(SALE_URL)
+
+
+# ---------------------------------------------------------------------------
+# Catalog API (verified live Nov 19, 2026: q=<itemId> returns exactly
+# that item, with the exact selling price)
+# ---------------------------------------------------------------------------
+
+CATALOG_FIXTURE = Path(__file__).parent / "fixtures" / "daraz_catalog_search.json"
+
+
+class _FakeCatalogResponse:
+    """Minimal stub of ``requests.Response`` for catalog tests."""
+
+    def __init__(self, payload=None, status=200, text=""):
+        self._payload = payload
+        self.status_code = status
+        self.text = text
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import requests as _requests
+
+            raise _requests.HTTPError(f"{self.status_code} error")
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("No JSON object could be decoded")
+        return self._payload
+
+
+def _catalog_fixture_payload():
+    import json as _json
+
+    return _json.loads(CATALOG_FIXTURE.read_text(encoding="utf-8"))
+
+
+def test_daraz_catalog_price_returns_sale_price(monkeypatch):
+    """The catalog fixture carries the real sale: item 1983435427 at
+    Rs. 699 (original 2,199). The fetch must return the SALE price."""
+    calls = {}
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        calls["url"] = url
+        calls["params"] = params
+        return _FakeCatalogResponse(_catalog_fixture_payload())
+
+    monkeypatch.setattr(scraper.requests, "get", fake_get)
+    name, price, currency = scraper.fetch_daraz_catalog_price(SALE_URL)
+    assert "AirBuds_Pro" in name
+    assert price == 699.0
     assert currency == "PKR"
-    assert meta["rendered"] is False
-    assert meta["fallback_reason"] == "no browser"
+    assert calls["url"] == "https://www.daraz.pk/catalog/"
+    assert calls["params"]["q"] == "1983435427"
+    assert calls["params"]["ajax"] == "true"
+
+
+def test_daraz_catalog_no_match_raises(monkeypatch):
+    """Item id present in the URL but absent from the results."""
+    payload = {"mods": {"listItems": [{"itemId": "111", "name": "Other", "price": "5"}]}}
+    monkeypatch.setattr(
+        scraper.requests, "get", lambda *a, **k: _FakeCatalogResponse(payload)
+    )
+    with pytest.raises(ScrapeError, match="has no item 1983435427"):
+        scraper.fetch_daraz_catalog_price(SALE_URL)
+
+
+def test_daraz_catalog_http_error_raises(monkeypatch):
+    monkeypatch.setattr(
+        scraper.requests, "get", lambda *a, **k: _FakeCatalogResponse(status=503)
+    )
+    with pytest.raises(ScrapeError, match="catalog lookup failed"):
+        scraper.fetch_daraz_catalog_price(SALE_URL)
+
+
+def test_daraz_catalog_non_json_raises(monkeypatch):
+    monkeypatch.setattr(
+        scraper.requests, "get", lambda *a, **k: _FakeCatalogResponse(None)
+    )
+    with pytest.raises(ScrapeError, match="non-JSON"):
+        scraper.fetch_daraz_catalog_price(SALE_URL)
+
+
+def test_daraz_catalog_url_without_item_id_raises():
+    with pytest.raises(ScrapeError, match="No Daraz item id"):
+        scraper.fetch_daraz_catalog_price("https://www.daraz.pk/products/no-id-here.html")
 
 
 def test_launch_browser_falls_back_to_system_chromium(monkeypatch):
