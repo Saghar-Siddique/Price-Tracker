@@ -81,7 +81,9 @@ streamlit run dashboard_app.py
 ```
 
 The dashboard seeds itself with demo data on first run, so you can explore
-every chart offline before adding real products.
+every chart offline before adding real products. Demo rows use fake URLs,
+so their price checks are expected to fail — those failures are hidden
+from the dashboard, and only real products' failed checks are shown.
 
 ## CLI usage
 

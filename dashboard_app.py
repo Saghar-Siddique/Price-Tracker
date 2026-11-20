@@ -142,7 +142,7 @@ with st.sidebar:
 
     st.header("🔄 Price check")
     if st.button("Check prices now"):
-        with st.spinner("Rendering pages in headless browser for exact prices..."):
+        with st.spinner("Checking prices..."):
             report: list[CheckOutcome] = []
             st.session_state["alerts"] = check_all(db_path, report=report)
             st.session_state["check_report"] = report
@@ -198,8 +198,13 @@ if alerts:
 # ---- check report: per-product outcomes from the last "Check prices now"
 # A static-fallback warning is shown, not hidden: a recorded price that
 # came from static HTML may be the list price, not the sale price.
+# Demo rows are sample data with fake URLs — their checks are expected
+# to fail, so a red error for them is noise, not meaningful info, and is
+# skipped. A real product's failed check still shows its error.
 for outcome in st.session_state.get("check_report", []):
     if not outcome.ok:
+        if outcome.product_name.startswith("Demo:"):
+            continue
         st.error(f"❌ {outcome.product_name}: price check failed ({outcome.error}). Previous price kept.")
     elif outcome.rendered is False:
         st.warning(

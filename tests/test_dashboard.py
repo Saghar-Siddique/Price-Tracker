@@ -81,3 +81,20 @@ def test_dashboard_shows_failed_check_error(tmp_path, monkeypatch):
     at.run()
     assert not at.exception, at.exception
     assert any("price check failed" in str(e.value) for e in at.error)
+
+
+def test_dashboard_hides_failed_check_error_for_demo_products(tmp_path, monkeypatch):
+    """Demo rows are sample data with fake URLs — their checks are
+    expected to fail, so their errors must not show. A real product's
+    failed check must still show its error."""
+    from price_tracker.tracker import CheckOutcome
+
+    at = _run(tmp_path, monkeypatch)
+    at.session_state["check_report"] = [
+        CheckOutcome(1, "Demo: Wireless Earbuds Pro", ok=False, error="boom"),
+        CheckOutcome(2, "Test Earbuds", ok=False, error="boom"),
+    ]
+    at.run()
+    assert not at.exception, at.exception
+    assert any("Test Earbuds" in str(e.value) for e in at.error)
+    assert not any("Demo: Wireless Earbuds Pro" in str(e.value) for e in at.error)
